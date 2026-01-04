@@ -84,6 +84,9 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 							<a href="#" id="nav-add-keys" class="block py-2.5 px-4 rounded-lg hover:bg-slate-700 transition-colors">
 								添加密钥
 							</a>
+							<a href="#" id="nav-stats" class="block py-2.5 px-4 rounded-lg hover:bg-slate-700 transition-colors">
+								📊 统计面板
+							</a>
 						</nav>
 					</div>
 					<div class="flex-1 p-8 overflow-y-auto">
@@ -174,6 +177,63 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 								</form>
 							</div>
 						</div>
+						<div id="page-stats" class="hidden">
+							<h2 class="text-3xl font-bold mb-6 text-slate-700">📊 统计面板</h2>
+							<div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+								<div class="bg-white p-4 rounded-lg shadow-sm">
+									<p class="text-sm text-slate-500">24小时请求数</p>
+									<p id="stat-total-requests" class="text-2xl font-bold text-sky-600">--</p>
+								</div>
+								<div class="bg-white p-4 rounded-lg shadow-sm">
+									<p class="text-sm text-slate-500">成功率</p>
+									<p id="stat-success-rate" class="text-2xl font-bold text-emerald-600">--</p>
+								</div>
+								<div class="bg-white p-4 rounded-lg shadow-sm">
+									<p class="text-sm text-slate-500">429 限流次数</p>
+									<p id="stat-rate-limited" class="text-2xl font-bold text-amber-600">--</p>
+								</div>
+								<div class="bg-white p-4 rounded-lg shadow-sm">
+									<p class="text-sm text-slate-500">平均响应时间</p>
+									<p id="stat-avg-response" class="text-2xl font-bold text-violet-600">--</p>
+								</div>
+							</div>
+							<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+								<div class="bg-white p-6 rounded-lg shadow-sm">
+									<h3 class="text-lg font-semibold mb-4 text-slate-600">模型使用统计</h3>
+									<div class="max-h-64 overflow-y-auto">
+										<table class="w-full text-sm">
+											<thead class="bg-slate-50">
+												<tr>
+													<th class="p-2 text-left">模型</th>
+													<th class="p-2 text-right">请求数</th>
+													<th class="p-2 text-right">平均响应(ms)</th>
+												</tr>
+											</thead>
+											<tbody id="model-stats-body" class="divide-y"></tbody>
+										</table>
+									</div>
+								</div>
+								<div class="bg-white p-6 rounded-lg shadow-sm">
+									<h3 class="text-lg font-semibold mb-4 text-slate-600">Key 使用统计</h3>
+									<div class="max-h-64 overflow-y-auto">
+										<table class="w-full text-sm">
+											<thead class="bg-slate-50">
+												<tr>
+													<th class="p-2 text-left">Key (后8位)</th>
+													<th class="p-2 text-right">调用次数</th>
+													<th class="p-2 text-right">平均响应(ms)</th>
+													<th class="p-2 text-center">状态</th>
+												</tr>
+											</thead>
+											<tbody id="key-stats-body" class="divide-y"></tbody>
+										</table>
+									</div>
+								</div>
+							</div>
+							<button id="refresh-stats-btn" class="mt-4 px-4 py-2 bg-slate-200 text-slate-700 rounded-lg hover:bg-slate-300 transition-colors shadow-sm">
+								刷新统计
+							</button>
+						</div>
 					</div>
 				</div>
 
@@ -196,30 +256,36 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 
 										const navKeysList = document.getElementById('nav-keys-list');
 										const navAddKeys = document.getElementById('nav-add-keys');
+										const navStats = document.getElementById('nav-stats');
 										const pageKeysList = document.getElementById('page-keys-list');
 										const pageAddKeys = document.getElementById('page-add-keys');
+										const pageStats = document.getElementById('page-stats');
+										const refreshStatsBtn = document.getElementById('refresh-stats-btn');
 
 										let currentPage = 1;
 										const pageSize = 50;
 										let totalPages = 1;
 
 										const showPage = (pageId) => {
-											[pageKeysList, pageAddKeys].forEach(page => {
-												if (page.id === pageId) {
+											[pageKeysList, pageAddKeys, pageStats].forEach(page => {
+												if (page && page.id === pageId) {
 													page.classList.remove('hidden');
-												} else {
+												} else if (page) {
 													page.classList.add('hidden');
 												}
 											});
-											[navKeysList, navAddKeys].forEach(nav => {
-												if (nav.id === \`nav-\${pageId.split('-')[1]}-\${pageId.split('-')[2]}\`) {
-													nav.classList.add('bg-gray-700');
-													nav.classList.remove('hover:bg-gray-700');
-												} else {
-													nav.classList.remove('bg-gray-700');
-													nav.classList.add('hover:bg-gray-700');
+											[navKeysList, navAddKeys, navStats].forEach(nav => {
+												if (nav && nav.id === 'nav-' + pageId.replace('page-', '')) {
+													nav.classList.add('bg-slate-700');
+													nav.classList.remove('hover:bg-slate-700');
+												} else if (nav) {
+													nav.classList.remove('bg-slate-700');
+													nav.classList.add('hover:bg-slate-700');
 												}
 											});
+											if (pageId === 'page-stats') {
+												fetchAndRenderStats();
+											}
 										};
 
 										navKeysList.addEventListener('click', (e) => {
@@ -231,6 +297,61 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 											e.preventDefault();
 											showPage('page-add-keys');
 										});
+
+										navStats.addEventListener('click', (e) => {
+											e.preventDefault();
+											showPage('page-stats');
+										});
+
+										// 统计数据获取和渲染
+										const fetchAndRenderStats = async () => {
+											try {
+												const refreshBtn = document.getElementById('refresh-stats-btn');
+												if (refreshBtn) refreshBtn.innerHTML = '加载中...';
+												
+												const response = await fetch('/api/stats');
+												if (!response.ok) throw new Error('Failed to fetch stats');
+												const data = await response.json();
+
+												document.getElementById('stat-total-requests').textContent = data.overview.totalRequests.toLocaleString();
+												document.getElementById('stat-success-rate').textContent = data.overview.successRate + '%';
+												document.getElementById('stat-rate-limited').textContent = data.overview.rateLimitedCount.toLocaleString();
+												document.getElementById('stat-avg-response').textContent = data.overview.avgResponseTime + 'ms';
+
+												const modelStatsBody = document.getElementById('model-stats-body');
+												modelStatsBody.innerHTML = data.modelStats.length === 0 
+													? '<tr><td colspan="3" class="p-2 text-center text-slate-500">暂无数据</td></tr>'
+													: data.modelStats.map(m => \`
+														<tr class="hover:bg-slate-50">
+															<td class="p-2 font-mono text-sm">\${m.model}</td>
+															<td class="p-2 text-right">\${m.requests.toLocaleString()}</td>
+															<td class="p-2 text-right">\${m.avgResponseTime}</td>
+														</tr>
+													\`).join('');
+
+												const keyStatsBody = document.getElementById('key-stats-body');
+												keyStatsBody.innerHTML = data.keyStats.length === 0
+													? '<tr><td colspan="4" class="p-2 text-center text-slate-500">暂无数据</td></tr>'
+													: data.keyStats.map(k => \`
+														<tr class="hover:bg-slate-50">
+															<td class="p-2 font-mono text-sm">...\${k.apiKey.slice(-8)}</td>
+															<td class="p-2 text-right">\${k.usageCount.toLocaleString()}</td>
+															<td class="p-2 text-right">\${k.avgResponseTime}</td>
+															<td class="p-2 text-center"><span class="px-2 py-1 rounded text-xs \${k.keyGroup === 'normal' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">\${k.keyGroup === 'normal' ? '正常' : '异常'}</span></td>
+														</tr>
+													\`).join('');
+											} catch (error) {
+												console.error('Failed to fetch stats:', error);
+											} finally {
+												const refreshBtn = document.getElementById('refresh-stats-btn');
+												if (refreshBtn) refreshBtn.innerHTML = '刷新统计';
+											}
+										};
+
+										if (refreshStatsBtn) {
+											refreshStatsBtn.addEventListener('click', fetchAndRenderStats);
+										}
+
 
 										const updatePaginationControls = () => {
 												pageInfoSpan.textContent = \`第 \${currentPage} / \${totalPages} 页\`;

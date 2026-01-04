@@ -52,11 +52,30 @@ export class LoadBalancer extends DurableObject {
 				last_checked_at INTEGER,
 				failed_count INTEGER NOT NULL DEFAULT 0,
 				key_group TEXT CHECK(key_group IN ('normal', 'abnormal')) NOT NULL DEFAULT 'normal',
+				usage_count INTEGER NOT NULL DEFAULT 0,
+				response_time_avg INTEGER NOT NULL DEFAULT 0,
+				last_used_at INTEGER,
 				FOREIGN KEY(api_key) REFERENCES api_keys(api_key) ON DELETE CASCADE
+			);
+			CREATE TABLE IF NOT EXISTS request_stats (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				api_key TEXT,
+				model TEXT,
+				prompt_tokens INTEGER DEFAULT 0,
+				completion_tokens INTEGER DEFAULT 0,
+				response_time_ms INTEGER,
+				status_code INTEGER,
+				created_at INTEGER
+			);
+			CREATE TABLE IF NOT EXISTS rate_limits (
+				identifier TEXT PRIMARY KEY,
+				request_count INTEGER DEFAULT 0,
+				window_start INTEGER
 			);
 		`);
 		this.ctx.storage.setAlarm(Date.now() + 5 * 60 * 1000); // Set an alarm to run in 5 minutes
 	}
+
 
 	async alarm() {
 		// 1. Handle abnormal keys
@@ -162,7 +181,7 @@ export class LoadBalancer extends DurableObject {
 		}
 
 		// 管理 API 权限校验（使用 HOME_ACCESS_KEY）
-		if (pathname === '/api/keys' || pathname === '/api/keys/check') {
+		if (pathname === '/api/keys' || pathname === '/api/keys/check' || pathname === '/api/stats') {
 			if (!isAdminAuthenticated(request, this.env.HOME_ACCESS_KEY)) {
 				return new Response(JSON.stringify({ error: 'Unauthorized' }), {
 					status: 401,
@@ -181,7 +200,28 @@ export class LoadBalancer extends DurableObject {
 			if (pathname === '/api/keys/check' && request.method === 'POST') {
 				return this.handleApiKeysCheck(request);
 			}
+			if (pathname === '/api/stats' && request.method === 'GET') {
+				return this.getRequestStats();
+			}
 		}
+
+		// 速率限制检查
+		if (this.env.RATE_LIMIT_ENABLED) {
+			const identifier = request.headers.get('CF-Connecting-IP') ?? 'unknown';
+			const isLimited = await this.checkRateLimit(identifier);
+			if (isLimited) {
+				return new Response(JSON.stringify({ error: 'Rate limit exceeded. Please try again later.' }), {
+					status: 429,
+					headers: fixCors({
+						headers: {
+							'Content-Type': 'application/json',
+							'Retry-After': '60'
+						}
+					}).headers,
+				});
+			}
+		}
+
 
 		const search = url.search;
 
@@ -264,7 +304,7 @@ export class LoadBalancer extends DurableObject {
 		});
 	}
 
-	// 对请求进行负载均衡，随机分发key
+	// 对请求进行负载均衡，随机分发key，支持自动重试
 	private async forwardRequestWithLoadBalancing(targetUrl: string, request: Request): Promise<Response> {
 		try {
 			let headers = new Headers();
@@ -284,22 +324,243 @@ export class LoadBalancer extends DurableObject {
 					headers.set('x-goog-api-key', clientApiKey);
 				}
 
-				return this.forwardRequest(url.toString(), request, headers, clientApiKey || '');
-			}
-			const apiKey = await this.getRandomApiKey();
-			if (!apiKey) {
-				return new Response('No API keys configured in the load balancer.', { status: 500 });
+				const startTime = Date.now();
+				const response = await this.forwardRequest(url.toString(), request, headers, clientApiKey || '');
+				const responseTime = Date.now() - startTime;
+				await this.recordRequestStats(clientApiKey || '', url.pathname, responseTime, response.status);
+				return response;
 			}
 
-			url.searchParams.set('key', apiKey);
-			headers.set('x-goog-api-key', apiKey);
-			return this.forwardRequest(url.toString(), request, headers, apiKey);
+			// 自动重试机制
+			const maxRetries = typeof this.env.MAX_RETRY_COUNT === 'number' ? this.env.MAX_RETRY_COUNT : 2;
+			const usedKeys: Set<string> = new Set();
+			let lastResponse: Response | null = null;
+
+			for (let attempt = 0; attempt <= maxRetries; attempt++) {
+				const apiKey = await this.getRandomApiKey(usedKeys);
+				if (!apiKey) {
+					if (lastResponse) return lastResponse;
+					return new Response('No API keys configured in the load balancer.', { status: 500 });
+				}
+
+				usedKeys.add(apiKey);
+				const requestUrl = new URL(targetUrl);
+				requestUrl.searchParams.set('key', apiKey);
+				const requestHeaders = new Headers(headers);
+				requestHeaders.set('x-goog-api-key', apiKey);
+
+				const startTime = Date.now();
+				const response = await this.forwardRequest(requestUrl.toString(), request, requestHeaders, apiKey);
+				const responseTime = Date.now() - startTime;
+
+				// 记录统计数据
+				await this.recordRequestStats(apiKey, url.pathname, responseTime, response.status);
+				await this.updateKeyStats(apiKey, responseTime);
+
+				// 如果成功或非可重试错误，直接返回
+				if (response.ok || (response.status !== 429 && response.status < 500)) {
+					return response;
+				}
+
+				// 可重试错误，记录并继续
+				lastResponse = response;
+				console.log(`[Retry] Attempt ${attempt + 1}/${maxRetries} failed with status ${response.status} for key ...${apiKey.slice(-6)}`);
+			}
+
+			return lastResponse ?? new Response('All retries exhausted', { status: 503 });
 		} catch (error) {
 			console.error('Failed to fetch:', error);
 			return new Response('Internal Server Error\n' + error, {
 				status: 500,
 				headers: { 'Content-Type': 'text/plain' },
 			});
+		}
+	}
+
+	// 记录请求统计
+	private async recordRequestStats(apiKey: string, path: string, responseTimeMs: number, statusCode: number): Promise<void> {
+		try {
+			// 提取模型名称
+			const modelMatch = path.match(/models\/([^/:]+)/);
+			const model = modelMatch ? modelMatch[1] : 'unknown';
+
+			await this.ctx.storage.sql.exec(
+				`INSERT INTO request_stats (api_key, model, response_time_ms, status_code, created_at) VALUES (?, ?, ?, ?, ?)`,
+				apiKey.slice(-8), // 只存储后8位用于识别
+				model,
+				responseTimeMs,
+				statusCode,
+				Date.now()
+			);
+
+			// 清理7天前的统计数据
+			const sevenDaysAgo = Date.now() - (this.env.STATS_RETENTION_DAYS ?? 7) * 24 * 60 * 60 * 1000;
+			await this.ctx.storage.sql.exec(`DELETE FROM request_stats WHERE created_at < ?`, sevenDaysAgo);
+		} catch (e) {
+			console.error('Failed to record request stats:', e);
+		}
+	}
+
+	// 更新 key 的使用统计
+	private async updateKeyStats(apiKey: string, responseTimeMs: number): Promise<void> {
+		try {
+			// 更新使用计数和平均响应时间（滚动平均）
+			await this.ctx.storage.sql.exec(
+				`UPDATE api_key_statuses SET 
+					usage_count = usage_count + 1,
+					response_time_avg = (response_time_avg * usage_count + ?) / (usage_count + 1),
+					last_used_at = ?
+				WHERE api_key = ?`,
+				responseTimeMs,
+				Date.now(),
+				apiKey
+			);
+		} catch (e) {
+			console.error('Failed to update key stats:', e);
+		}
+	}
+
+	// 获取请求统计数据
+	private async getRequestStats(): Promise<Response> {
+		try {
+			const now = Date.now();
+			const oneDayAgo = now - 24 * 60 * 60 * 1000;
+			const oneHourAgo = now - 60 * 60 * 1000;
+
+			// 获取总体统计
+			const overallStats = await this.ctx.storage.sql.exec(`
+				SELECT 
+					COUNT(*) as total_requests,
+					SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) as success_count,
+					SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END) as rate_limited_count,
+					AVG(response_time_ms) as avg_response_time
+				FROM request_stats 
+				WHERE created_at > ?
+			`, oneDayAgo).raw<any>();
+
+			// 获取按模型分组的统计
+			const modelStats = await this.ctx.storage.sql.exec(`
+				SELECT 
+					model,
+					COUNT(*) as requests,
+					AVG(response_time_ms) as avg_response_time
+				FROM request_stats 
+				WHERE created_at > ?
+				GROUP BY model
+				ORDER BY requests DESC
+				LIMIT 10
+			`, oneDayAgo).raw<any>();
+
+			// 获取最近1小时的请求趋势
+			const hourlyTrend = await this.ctx.storage.sql.exec(`
+				SELECT 
+					(created_at / 300000) * 300000 as time_bucket,
+					COUNT(*) as requests
+				FROM request_stats 
+				WHERE created_at > ?
+				GROUP BY time_bucket
+				ORDER BY time_bucket ASC
+			`, oneHourAgo).raw<any>();
+
+			// 获取 key 使用统计
+			const keyStats = await this.ctx.storage.sql.exec(`
+				SELECT 
+					api_key,
+					usage_count,
+					response_time_avg,
+					key_group,
+					last_used_at
+				FROM api_key_statuses
+				ORDER BY usage_count DESC
+				LIMIT 20
+			`).raw<any>();
+
+			const overall = Array.from(overallStats)[0] || [0, 0, 0, 0];
+			const models = Array.from(modelStats).map((row: any) => ({
+				model: row[0],
+				requests: row[1],
+				avgResponseTime: Math.round(row[2])
+			}));
+			const trend = Array.from(hourlyTrend).map((row: any) => ({
+				time: row[0],
+				requests: row[1]
+			}));
+			const keys = Array.from(keyStats).map((row: any) => ({
+				apiKey: row[0],
+				usageCount: row[1],
+				avgResponseTime: Math.round(row[2]),
+				keyGroup: row[3],
+				lastUsedAt: row[4]
+			}));
+
+			return new Response(JSON.stringify({
+				overview: {
+					totalRequests: overall[0],
+					successCount: overall[1],
+					rateLimitedCount: overall[2],
+					avgResponseTime: Math.round(overall[3] || 0),
+					successRate: overall[0] > 0 ? Math.round((overall[1] / overall[0]) * 100) : 0
+				},
+				modelStats: models,
+				hourlyTrend: trend,
+				keyStats: keys
+			}), {
+				headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
+			});
+		} catch (error: any) {
+			console.error('获取统计数据失败:', error);
+			return new Response(JSON.stringify({ error: error.message || '内部服务器错误' }), {
+				status: 500,
+				headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
+			});
+		}
+	}
+
+	// 检查速率限制
+	private async checkRateLimit(identifier: string): Promise<boolean> {
+		try {
+			const limit = this.env.RATE_LIMIT_PER_MINUTE ?? 60;
+			const now = Date.now();
+			const windowStart = now - 60000; // 1分钟窗口
+
+			// 清理过期记录
+			await this.ctx.storage.sql.exec(
+				`DELETE FROM rate_limits WHERE window_start < ?`,
+				windowStart
+			);
+
+			// 获取当前计数
+			const result = await this.ctx.storage.sql.exec(
+				`SELECT request_count FROM rate_limits WHERE identifier = ?`,
+				identifier
+			).raw<any>();
+			const rows = Array.from(result);
+
+			if (rows.length === 0) {
+				// 新用户，创建记录
+				await this.ctx.storage.sql.exec(
+					`INSERT INTO rate_limits (identifier, request_count, window_start) VALUES (?, 1, ?)`,
+					identifier,
+					now
+				);
+				return false;
+			}
+
+			const currentCount = rows[0][0] as number;
+			if (currentCount >= limit) {
+				console.log(`[RateLimit] Identifier ${identifier} exceeded limit (${currentCount}/${limit})`);
+				return true;
+			}
+
+			// 增加计数
+			await this.ctx.storage.sql.exec(
+				`UPDATE rate_limits SET request_count = request_count + 1 WHERE identifier = ?`,
+				identifier
+			);
+			return false;
+		} catch (error) {
+			console.error('Rate limit check failed:', error);
+			return false; // 出错时放行
 		}
 	}
 
@@ -1124,12 +1385,12 @@ export class LoadBalancer extends DurableObject {
 				.raw<any>();
 			const keys = results
 				? Array.from(results).map((row: any) => ({
-						api_key: row[0],
-						status: row[1],
-						key_group: row[2],
-						last_checked_at: row[3],
-						failed_count: row[4],
-				  }))
+					api_key: row[0],
+					status: row[1],
+					key_group: row[2],
+					last_checked_at: row[3],
+					failed_count: row[4],
+				}))
 				: [];
 
 			return new Response(JSON.stringify({ keys, total }), {
@@ -1172,27 +1433,48 @@ export class LoadBalancer extends DurableObject {
 		return null;
 	}
 
-	private async getRandomApiKey(): Promise<string | null> {
+	private async getRandomApiKey(excludeKeys?: Set<string>): Promise<string | null> {
 		try {
+			const strategy = this.env.LOAD_BALANCE_STRATEGY ?? 'random';
+			const excludeArray = excludeKeys ? Array.from(excludeKeys) : [];
+			const excludePlaceholders = excludeArray.length > 0
+				? `AND api_key NOT IN (${excludeArray.map(() => '?').join(',')})`
+				: '';
+
+			// 根据策略选择排序方式
+			let orderBy: string;
+			switch (strategy) {
+				case 'least-used':
+					orderBy = 'ORDER BY usage_count ASC, RANDOM()';
+					break;
+				case 'fastest':
+					orderBy = 'ORDER BY response_time_avg ASC, RANDOM()';
+					break;
+				default: // 'random'
+					orderBy = 'ORDER BY RANDOM()';
+			}
+
 			// First, try to get a key from the normal group
+			const normalQuery = `SELECT api_key FROM api_key_statuses WHERE key_group = 'normal' ${excludePlaceholders} ${orderBy} LIMIT 1`;
 			let results = await this.ctx.storage.sql
-				.exec("SELECT api_key FROM api_key_statuses WHERE key_group = 'normal' ORDER BY RANDOM() LIMIT 1")
+				.exec(normalQuery, ...excludeArray)
 				.raw<any>();
 			let keys = Array.from(results);
 			if (keys && keys.length > 0) {
 				const key = keys[0][0] as string;
-				console.log(`Gemini Selected API Key from normal group: ${key}`);
+				console.log(`[LoadBalance] Selected API Key from normal group (${strategy}): ...${key.slice(-6)}`);
 				return key;
 			}
 
 			// If no keys in normal group, try the abnormal group
+			const abnormalQuery = `SELECT api_key FROM api_key_statuses WHERE key_group = 'abnormal' ${excludePlaceholders} ${orderBy} LIMIT 1`;
 			results = await this.ctx.storage.sql
-				.exec("SELECT api_key FROM api_key_statuses WHERE key_group = 'abnormal' ORDER BY RANDOM() LIMIT 1")
+				.exec(abnormalQuery, ...excludeArray)
 				.raw<any>();
 			keys = Array.from(results);
 			if (keys && keys.length > 0) {
 				const key = keys[0][0] as string;
-				console.log(`Gemini Selected API Key from abnormal group: ${key}`);
+				console.log(`[LoadBalance] Selected API Key from abnormal group (${strategy}): ...${key.slice(-6)}`);
 				return key;
 			}
 
@@ -1202,6 +1484,7 @@ export class LoadBalancer extends DurableObject {
 			return null;
 		}
 	}
+
 
 	private async handleOpenAI(request: Request): Promise<Response> {
 		const authKey = this.env.AUTH_KEY;

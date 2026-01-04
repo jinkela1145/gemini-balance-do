@@ -7,10 +7,12 @@
 	"name": "gemini-balance-do",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-08-05",
-	"keep_vars": true,//部署时保留 Cloudflare 控制台中设置的变量值，不被 vars 字段覆盖
+	"keep_vars": true, //部署时保留 Cloudflare 控制台中设置的变量值，不被 vars 字段覆盖
 	"migrations": [
 		{
-			"new_sqlite_classes": ["LoadBalancer"],
+			"new_sqlite_classes": [
+				"LoadBalancer"
+			],
 			"tag": "v1"
 		}
 	],
@@ -28,7 +30,12 @@
 	"vars": {
 		"AUTH_KEY": "ajielu",
 		"HOME_ACCESS_KEY": "7b18e536c27ab304266db3220b8e000db8fbbe35d6e1fde729a1a1d47303858d",
-		"FORWARD_CLIENT_KEY_ENABLED": false
+		"FORWARD_CLIENT_KEY_ENABLED": false,
+		"MAX_RETRY_COUNT": 2,
+		"LOAD_BALANCE_STRATEGY": "random",
+		"RATE_LIMIT_ENABLED": false,
+		"RATE_LIMIT_PER_MINUTE": 60,
+		"STATS_RETENTION_DAYS": 7
 	}
 	/**
 	 * Smart Placement
@@ -45,7 +52,6 @@
 	 * Environment Variables
 	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
 	 */
-
 	/**
 	 * Note: Use secrets to store sensitive data.
 	 * https://developers.cloudflare.com/workers/configuration/secrets/
