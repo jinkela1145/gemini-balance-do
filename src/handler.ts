@@ -1628,6 +1628,20 @@ export class LoadBalancer extends DurableObject {
 			};
 		}
 
+		// Pre-scan messages to map tool_use_id to function name
+		const toolIdToName = new Map<string, string>();
+		if (req.messages) {
+			for (const msg of req.messages) {
+				if (Array.isArray(msg.content)) {
+					for (const block of msg.content) {
+						if (block.type === 'tool_use') {
+							toolIdToName.set(block.id, block.name);
+						}
+					}
+				}
+			}
+		}
+
 		// Convert messages
 		for (const msg of req.messages || []) {
 			const role = msg.role === 'assistant' ? 'model' : 'user';
@@ -1659,14 +1673,19 @@ export class LoadBalancer extends DurableObject {
 						});
 					} else if (block.type === 'tool_result') {
 						// Claude tool_result -> Gemini functionResponse
-						parts.push({
-							functionResponse: {
-								name: block.tool_use_id,
-								response: {
-									content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
+						const functionName = toolIdToName.get(block.tool_use_id);
+						if (functionName) {
+							parts.push({
+								functionResponse: {
+									name: functionName,
+									response: {
+										content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
+									}
 								}
-							}
-						});
+							});
+						} else {
+							console.warn(`Could not find function name for tool_use_id: ${block.tool_use_id}`);
+						}
 					}
 				}
 			}
