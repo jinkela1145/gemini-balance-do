@@ -1559,6 +1559,17 @@ export class LoadBalancer extends DurableObject {
 		const authKey = this.env.AUTH_KEY;
 		let apiKey: string | null;
 
+		// Log Claude Code debugging info
+		console.log('--- Claude Code Request Debug ---');
+		console.log('Method:', request.method);
+		console.log('URL:', request.url);
+		console.log('Headers:', JSON.stringify(Object.fromEntries(request.headers)));
+
+		const reqClone = request.clone();
+		const reqBody = await reqClone.text();
+		console.log('Body:', reqBody);
+		console.log('---------------------------------');
+
 		// Claude uses x-api-key header or Authorization header
 		const xApiKey = request.headers.get('x-api-key');
 		const authHeader = request.headers.get('Authorization');
