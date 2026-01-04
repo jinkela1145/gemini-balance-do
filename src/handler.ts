@@ -1696,6 +1696,13 @@ export class LoadBalancer extends DurableObject {
 							});
 						}
 					} else if (block.type === 'tool_use') {
+						// Ensure there is some thought/text before function call for Gemini 2.0 Thinking models
+						// Check if previous part is text, if not add one
+						const lastPart = parts[parts.length - 1];
+						if (!lastPart || !lastPart.text) {
+							parts.push({ text: "Thinking about tool execution..." });
+						}
+
 						// Claude tool_use -> Gemini functionCall
 						parts.push({
 							functionCall: {
