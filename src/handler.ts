@@ -57,6 +57,11 @@ export class LoadBalancer extends DurableObject {
 				last_used_at INTEGER,
 				FOREIGN KEY(api_key) REFERENCES api_keys(api_key) ON DELETE CASCADE
 			);
+			CREATE TABLE IF NOT EXISTS tool_signatures (
+				tool_id TEXT PRIMARY KEY,
+				signature_data TEXT,
+				created_at INTEGER
+			);
 			CREATE TABLE IF NOT EXISTS request_stats (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				api_key TEXT,
@@ -1697,20 +1702,14 @@ export class LoadBalancer extends DurableObject {
 						}
 					} else if (block.type === 'tool_use') {
 						// Claude tool_use -> Gemini functionCall
-						// Check for embedded thought signature in ID
+						// Retrieve persisted thought signature from DB
 						let thoughtData: any = {};
-						if (block.id && block.id.includes('__THOUGHT__')) {
-							const [realId, encodedThought] = block.id.split('__THOUGHT__');
-							try {
-								thoughtData = JSON.parse(atob(encodedThought));
-								block.id = realId; // Restore clean ID for internal mapping if needed
-								// Note: We don't change block.id in the loop because we might need strict matching? 
-								// Actually, map logic uses block.id. We should probably keep using the full ID in the map if the client sends it back full.
-								// But the client sends tool_result with tool_use_id. 
-								// If we send tool_use with ID "X__T__Y", client will return result with tool_use_id "X__T__Y".
-								// So we can extract it from the tool_use_id in the *tool_result* block processing or here in the assistant message processing.
-							} catch (e) { console.error('Failed to decode thought signature', e); }
-						}
+						try {
+							const row = this.ctx.storage.sql.exec("SELECT signature_data FROM tool_signatures WHERE tool_id = ?", block.id).one();
+							if (row && row.signature_data) {
+								thoughtData = JSON.parse(row.signature_data as string);
+							}
+						} catch (e) { console.error('Error looking up thought signature', e); }
 
 						const part: any = {
 							functionCall: {
@@ -1728,10 +1727,8 @@ export class LoadBalancer extends DurableObject {
 					} else if (block.type === 'tool_result') {
 						// Claude tool_result -> Gemini functionResponse
 						// Extract real ID if it contains thought signature (though here we just need the name)
-						let toolUseId = block.tool_use_id;
-						if (toolUseId.includes('__THOUGHT__')) {
-							toolUseId = toolUseId.split('__THOUGHT__')[0];
-						}
+						// Standard ID (Server-side persistence handles thought signature)
+						const toolUseId = block.tool_use_id;
 
 						// We need to match the ID from the previous turn. 
 						// The map `toolIdToName` was built from `block.id`. 
@@ -1789,6 +1786,7 @@ export class LoadBalancer extends DurableObject {
 		}
 
 		const isStream = req.stream === true;
+		const db = this.ctx.storage.sql;
 		const TASK = isStream ? 'streamGenerateContent' : 'generateContent';
 		let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
 		if (isStream) {
@@ -1860,9 +1858,10 @@ export class LoadBalancer extends DurableObject {
 										}
 
 										if (Object.keys(captureFields).length > 0) {
-											// Embed signature in ID
-											const encoded = btoa(JSON.stringify(captureFields));
-											toolId = `${toolId}__THOUGHT__${encoded}`;
+											// Save signature to DB
+											try {
+												db.exec("INSERT INTO tool_signatures (tool_id, signature_data, created_at) VALUES (?, ?, ?)", toolId, JSON.stringify(captureFields), Date.now());
+											} catch (e) { console.error('Error saving thought signature', e); }
 										}
 
 										controller.enqueue(`event: content_block_start\ndata: ${JSON.stringify({
@@ -1975,7 +1974,7 @@ export class LoadBalancer extends DurableObject {
 				} else if (part.functionCall) {
 					// Gemini functionCall -> Claude tool_use
 					stopReason = 'tool_use';
-					let toolId = 'toolu_' + Math.random().toString(36).substring(2, 15);
+					const toolId = 'toolu_' + Math.random().toString(36).substring(2, 15);
 
 					// Capture thought signature if present
 					const captureFields: any = {};
@@ -1987,8 +1986,9 @@ export class LoadBalancer extends DurableObject {
 					}
 
 					if (Object.keys(captureFields).length > 0) {
-						const encoded = btoa(JSON.stringify(captureFields));
-						toolId = `${toolId}__THOUGHT__${encoded}`;
+						try {
+							db.exec("INSERT INTO tool_signatures (tool_id, signature_data, created_at) VALUES (?, ?, ?)", toolId, JSON.stringify(captureFields), Date.now());
+						} catch (e) { console.error('Error saving thought signature', e); }
 					}
 
 					content.push({
