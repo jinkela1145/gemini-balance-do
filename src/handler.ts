@@ -1638,6 +1638,24 @@ export class LoadBalancer extends DurableObject {
 								}
 							});
 						}
+					} else if (block.type === 'tool_use') {
+						// Claude tool_use -> Gemini functionCall
+						parts.push({
+							functionCall: {
+								name: block.name,
+								args: block.input || {}
+							}
+						});
+					} else if (block.type === 'tool_result') {
+						// Claude tool_result -> Gemini functionResponse
+						parts.push({
+							functionResponse: {
+								name: block.tool_use_id,
+								response: {
+									content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content)
+								}
+							}
+						});
 					}
 				}
 			}
@@ -1661,6 +1679,16 @@ export class LoadBalancer extends DurableObject {
 
 		if (systemInstruction) {
 			geminiBody.systemInstruction = systemInstruction;
+		}
+
+		// Convert Claude tools to Gemini function_declarations
+		if (req.tools && Array.isArray(req.tools)) {
+			const functionDeclarations = req.tools.map((tool: any) => ({
+				name: tool.name,
+				description: tool.description || '',
+				parameters: tool.input_schema || { type: 'object', properties: {} }
+			}));
+			geminiBody.tools = [{ function_declarations: functionDeclarations }];
 		}
 
 		const isStream = req.stream === true;
@@ -1689,11 +1717,13 @@ export class LoadBalancer extends DurableObject {
 		const messageId = 'msg_' + this.generateId();
 
 		if (isStream) {
-			// Stream response in Claude format
+			// Stream response in Claude format with tool support
+			let toolCallIndex = 0;
 			const transformStream = new TransformStream({
 				buffer: '',
 				inputTokens: 0,
 				outputTokens: 0,
+				contentBlockIndex: 0,
 				async transform(chunk: string, controller: TransformStreamDefaultController) {
 					const self = this as any;
 					self.buffer += chunk;
@@ -1704,7 +1734,6 @@ export class LoadBalancer extends DurableObject {
 						if (!line.startsWith('data: ')) continue;
 						const data = line.slice(6);
 						if (data === '[DONE]') {
-							// Send final message_stop event
 							controller.enqueue(`event: message_stop\ndata: {"type":"message_stop"}\n\n`);
 							return;
 						}
@@ -1716,8 +1745,34 @@ export class LoadBalancer extends DurableObject {
 										self.outputTokens += Math.ceil(part.text.length / 4);
 										controller.enqueue(`event: content_block_delta\ndata: ${JSON.stringify({
 											type: 'content_block_delta',
-											index: 0,
+											index: self.contentBlockIndex,
 											delta: { type: 'text_delta', text: part.text }
+										})}\n\n`);
+									} else if (part.functionCall) {
+										// Gemini functionCall -> Claude tool_use
+										self.contentBlockIndex++;
+										const toolId = 'toolu_' + Math.random().toString(36).substring(2, 15);
+										controller.enqueue(`event: content_block_start\ndata: ${JSON.stringify({
+											type: 'content_block_start',
+											index: self.contentBlockIndex,
+											content_block: {
+												type: 'tool_use',
+												id: toolId,
+												name: part.functionCall.name,
+												input: {}
+											}
+										})}\n\n`);
+										controller.enqueue(`event: content_block_delta\ndata: ${JSON.stringify({
+											type: 'content_block_delta',
+											index: self.contentBlockIndex,
+											delta: {
+												type: 'input_json_delta',
+												partial_json: JSON.stringify(part.functionCall.args || {})
+											}
+										})}\n\n`);
+										controller.enqueue(`event: content_block_stop\ndata: ${JSON.stringify({
+											type: 'content_block_stop',
+											index: self.contentBlockIndex
 										})}\n\n`);
 									}
 								}
@@ -1733,7 +1788,6 @@ export class LoadBalancer extends DurableObject {
 				},
 				flush(controller: TransformStreamDefaultController) {
 					const self = this as any;
-					// Send message_delta with usage
 					controller.enqueue(`event: message_delta\ndata: ${JSON.stringify({
 						type: 'message_delta',
 						delta: { stop_reason: 'end_turn', stop_sequence: null },
@@ -1742,7 +1796,6 @@ export class LoadBalancer extends DurableObject {
 				}
 			} as any);
 
-			// Send initial events
 			const encoder = new TextEncoder();
 			const initialEvents = [
 				`event: message_start\ndata: ${JSON.stringify({
@@ -1770,7 +1823,6 @@ export class LoadBalancer extends DurableObject {
 				.pipeThrough(transformStream)
 				.pipeThrough(new TextEncoderStream());
 
-			// Prepend initial events
 			const reader = responseStream.getReader();
 			const outputStream = new ReadableStream({
 				async start(controller) {
@@ -1798,20 +1850,39 @@ export class LoadBalancer extends DurableObject {
 				}).headers,
 			});
 		} else {
-			// Non-streaming response
+			// Non-streaming response with tool support
 			const geminiResponse = await response.json() as any;
-			const textContent = geminiResponse.candidates?.[0]?.content?.parts
-				?.filter((p: any) => p.text)
-				?.map((p: any) => p.text)
-				?.join('') || '';
+			const content: any[] = [];
+			let stopReason = 'end_turn';
+
+			const parts = geminiResponse.candidates?.[0]?.content?.parts || [];
+			for (const part of parts) {
+				if (part.text) {
+					content.push({ type: 'text', text: part.text });
+				} else if (part.functionCall) {
+					// Gemini functionCall -> Claude tool_use
+					stopReason = 'tool_use';
+					content.push({
+						type: 'tool_use',
+						id: 'toolu_' + Math.random().toString(36).substring(2, 15),
+						name: part.functionCall.name,
+						input: part.functionCall.args || {}
+					});
+				}
+			}
+
+			// If no content, add empty text
+			if (content.length === 0) {
+				content.push({ type: 'text', text: '' });
+			}
 
 			const anthropicResponse = {
 				id: messageId,
 				type: 'message',
 				role: 'assistant',
-				content: [{ type: 'text', text: textContent }],
+				content,
 				model: req.model || model,
-				stop_reason: 'end_turn',
+				stop_reason: stopReason,
 				stop_sequence: null,
 				usage: {
 					input_tokens: geminiResponse.usageMetadata?.promptTokenCount || 0,
@@ -1825,3 +1896,4 @@ export class LoadBalancer extends DurableObject {
 		}
 	}
 }
+
