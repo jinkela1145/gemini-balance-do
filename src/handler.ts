@@ -1611,6 +1611,38 @@ export class LoadBalancer extends DurableObject {
 		}
 	}
 
+	// Helper to sanitize schema for Gemini
+	private cleanGeminiSchema(schema: any): any {
+		if (!schema || typeof schema !== 'object') return schema;
+
+		const clean: any = {};
+		// Allowed fields in Gemini Schema
+		const allowedFields = [
+			'type', 'format', 'description', 'nullable', 'enum',
+			'properties', 'required', 'items'
+		];
+
+		for (const key of Object.keys(schema)) {
+			// Skip forbidden fields
+			if (['additionalProperties', '$schema', 'title', 'default', 'minItems'].includes(key)) continue;
+
+			if (allowedFields.includes(key)) {
+				if (key === 'properties' && schema.properties) {
+					clean.properties = {};
+					for (const propKey of Object.keys(schema.properties)) {
+						clean.properties[propKey] = this.cleanGeminiSchema(schema.properties[propKey]);
+					}
+				} else if (key === 'items' && schema.items) {
+					clean.items = this.cleanGeminiSchema(schema.items);
+				} else {
+					clean[key] = schema[key];
+				}
+			}
+		}
+
+		return clean;
+	}
+
 	private async handleAnthropicMessages(req: any, apiKey: string): Promise<Response> {
 		let model = 'gemini-2.5-flash';
 		if (req.model && typeof req.model === 'string') {
@@ -1716,7 +1748,7 @@ export class LoadBalancer extends DurableObject {
 			const functionDeclarations = req.tools.map((tool: any) => ({
 				name: tool.name,
 				description: tool.description || '',
-				parameters: tool.input_schema || { type: 'object', properties: {} }
+				parameters: this.cleanGeminiSchema(tool.input_schema) || { type: 'object', properties: {} }
 			}));
 			geminiBody.tools = [{ function_declarations: functionDeclarations }];
 		}
