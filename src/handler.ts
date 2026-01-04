@@ -235,6 +235,12 @@ export class LoadBalancer extends DurableObject {
 			return this.handleOpenAI(request);
 		}
 
+		// Anthropic/Claude compatible routes
+		if (pathname.endsWith('/messages') || pathname.endsWith('/v1/messages')) {
+			return this.handleAnthropic(request);
+		}
+
+
 		// Direct Gemini proxy
 		const authKey = this.env.AUTH_KEY;
 
@@ -1542,6 +1548,299 @@ export class LoadBalancer extends DurableObject {
 				return this.handleModels(apiKey).catch(errHandler);
 			default:
 				throw new HttpError('404 Not Found', 404);
+		}
+	}
+
+	// ========================================
+	// Anthropic/Claude API Compatibility
+	// ========================================
+
+	private async handleAnthropic(request: Request): Promise<Response> {
+		const authKey = this.env.AUTH_KEY;
+		let apiKey: string | null;
+
+		// Claude uses x-api-key header or Authorization header
+		const xApiKey = request.headers.get('x-api-key');
+		const authHeader = request.headers.get('Authorization');
+		const clientKey = xApiKey || authHeader?.replace('Bearer ', '') || null;
+
+		if (this.env.FORWARD_CLIENT_KEY_ENABLED) {
+			if (!clientKey) {
+				return new Response(JSON.stringify({ error: { type: 'authentication_error', message: 'No API key provided' } }), {
+					status: 401,
+					headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
+				});
+			}
+			apiKey = clientKey;
+		} else {
+			if (authKey && clientKey !== authKey) {
+				return new Response(JSON.stringify({ error: { type: 'authentication_error', message: 'Invalid API key' } }), {
+					status: 401,
+					headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
+				});
+			}
+			apiKey = await this.getRandomApiKey();
+			if (!apiKey) {
+				return new Response(JSON.stringify({ error: { type: 'api_error', message: 'No API keys configured' } }), {
+					status: 500,
+					headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
+				});
+			}
+		}
+
+		try {
+			const req = await request.json() as any;
+			return this.handleAnthropicMessages(req, apiKey);
+		} catch (err: any) {
+			console.error('Anthropic handler error:', err);
+			return new Response(JSON.stringify({ error: { type: 'api_error', message: err.message } }), {
+				status: 500,
+				headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
+			});
+		}
+	}
+
+	private async handleAnthropicMessages(req: any, apiKey: string): Promise<Response> {
+		// Map Claude model to Gemini model
+		const modelMap: Record<string, string> = {
+			'claude-3-opus': 'gemini-2.5-pro',
+			'claude-3-sonnet': 'gemini-2.5-flash',
+			'claude-3-haiku': 'gemini-2.0-flash',
+			'claude-3-5-sonnet': 'gemini-2.5-flash',
+			'claude-3-5-haiku': 'gemini-2.0-flash',
+		};
+
+		let model = 'gemini-2.5-flash';
+		if (req.model) {
+			// Check for direct mapping
+			for (const [claudeModel, geminiModel] of Object.entries(modelMap)) {
+				if (req.model.includes(claudeModel)) {
+					model = geminiModel;
+					break;
+				}
+			}
+			// If model starts with gemini-, use it directly
+			if (req.model.startsWith('gemini-')) {
+				model = req.model;
+			}
+		}
+
+		// Convert Claude messages to Gemini format
+		const contents: any[] = [];
+		let systemInstruction: any = undefined;
+
+		// Handle system prompt
+		if (req.system) {
+			systemInstruction = {
+				parts: [{ text: typeof req.system === 'string' ? req.system : req.system.map((s: any) => s.text).join('\n') }]
+			};
+		}
+
+		// Convert messages
+		for (const msg of req.messages || []) {
+			const role = msg.role === 'assistant' ? 'model' : 'user';
+			const parts: any[] = [];
+
+			if (typeof msg.content === 'string') {
+				parts.push({ text: msg.content });
+			} else if (Array.isArray(msg.content)) {
+				for (const block of msg.content) {
+					if (block.type === 'text') {
+						parts.push({ text: block.text });
+					} else if (block.type === 'image') {
+						// Handle base64 image
+						if (block.source?.type === 'base64') {
+							parts.push({
+								inlineData: {
+									mimeType: block.source.media_type,
+									data: block.source.data
+								}
+							});
+						}
+					}
+				}
+			}
+
+			if (parts.length > 0) {
+				contents.push({ role, parts });
+			}
+		}
+
+		// Build Gemini request body
+		const geminiBody: any = {
+			contents,
+			generationConfig: {
+				maxOutputTokens: req.max_tokens || 4096,
+				temperature: req.temperature,
+				topP: req.top_p,
+				topK: req.top_k,
+				stopSequences: req.stop_sequences,
+			}
+		};
+
+		if (systemInstruction) {
+			geminiBody.systemInstruction = systemInstruction;
+		}
+
+		const isStream = req.stream === true;
+		const TASK = isStream ? 'streamGenerateContent' : 'generateContent';
+		let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
+		if (isStream) {
+			url += '?alt=sse';
+		}
+
+		const response = await fetch(url, {
+			method: 'POST',
+			headers: makeHeaders(apiKey, { 'Content-Type': 'application/json' }),
+			body: JSON.stringify(geminiBody),
+		});
+
+		if (!response.ok) {
+			const errorText = await response.text();
+			return new Response(JSON.stringify({
+				error: { type: 'api_error', message: errorText }
+			}), {
+				status: response.status,
+				headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
+			});
+		}
+
+		const messageId = 'msg_' + this.generateId();
+
+		if (isStream) {
+			// Stream response in Claude format
+			const transformStream = new TransformStream({
+				buffer: '',
+				inputTokens: 0,
+				outputTokens: 0,
+				async transform(chunk: string, controller: TransformStreamDefaultController) {
+					const self = this as any;
+					self.buffer += chunk;
+					const lines = self.buffer.split('\n');
+					self.buffer = lines.pop() || '';
+
+					for (const line of lines) {
+						if (!line.startsWith('data: ')) continue;
+						const data = line.slice(6);
+						if (data === '[DONE]') {
+							// Send final message_stop event
+							controller.enqueue(`event: message_stop\ndata: {"type":"message_stop"}\n\n`);
+							return;
+						}
+						try {
+							const parsed = JSON.parse(data);
+							if (parsed.candidates?.[0]?.content?.parts) {
+								for (const part of parsed.candidates[0].content.parts) {
+									if (part.text) {
+										self.outputTokens += Math.ceil(part.text.length / 4);
+										controller.enqueue(`event: content_block_delta\ndata: ${JSON.stringify({
+											type: 'content_block_delta',
+											index: 0,
+											delta: { type: 'text_delta', text: part.text }
+										})}\n\n`);
+									}
+								}
+							}
+							if (parsed.usageMetadata) {
+								self.inputTokens = parsed.usageMetadata.promptTokenCount || 0;
+								self.outputTokens = parsed.usageMetadata.candidatesTokenCount || 0;
+							}
+						} catch (e) {
+							// Skip invalid JSON
+						}
+					}
+				},
+				flush(controller: TransformStreamDefaultController) {
+					const self = this as any;
+					// Send message_delta with usage
+					controller.enqueue(`event: message_delta\ndata: ${JSON.stringify({
+						type: 'message_delta',
+						delta: { stop_reason: 'end_turn', stop_sequence: null },
+						usage: { output_tokens: self.outputTokens }
+					})}\n\n`);
+				}
+			} as any);
+
+			// Send initial events
+			const encoder = new TextEncoder();
+			const initialEvents = [
+				`event: message_start\ndata: ${JSON.stringify({
+					type: 'message_start',
+					message: {
+						id: messageId,
+						type: 'message',
+						role: 'assistant',
+						content: [],
+						model: req.model || model,
+						stop_reason: null,
+						stop_sequence: null,
+						usage: { input_tokens: 0, output_tokens: 0 }
+					}
+				})}\n\n`,
+				`event: content_block_start\ndata: ${JSON.stringify({
+					type: 'content_block_start',
+					index: 0,
+					content_block: { type: 'text', text: '' }
+				})}\n\n`
+			];
+
+			const responseStream = response.body!
+				.pipeThrough(new TextDecoderStream())
+				.pipeThrough(transformStream)
+				.pipeThrough(new TextEncoderStream());
+
+			// Prepend initial events
+			const reader = responseStream.getReader();
+			const outputStream = new ReadableStream({
+				async start(controller) {
+					for (const event of initialEvents) {
+						controller.enqueue(encoder.encode(event));
+					}
+				},
+				async pull(controller) {
+					const { done, value } = await reader.read();
+					if (done) {
+						controller.close();
+					} else {
+						controller.enqueue(value);
+					}
+				}
+			});
+
+			return new Response(outputStream, {
+				headers: fixCors({
+					headers: {
+						'Content-Type': 'text/event-stream',
+						'Cache-Control': 'no-cache',
+						'Connection': 'keep-alive'
+					}
+				}).headers,
+			});
+		} else {
+			// Non-streaming response
+			const geminiResponse = await response.json() as any;
+			const textContent = geminiResponse.candidates?.[0]?.content?.parts
+				?.filter((p: any) => p.text)
+				?.map((p: any) => p.text)
+				?.join('') || '';
+
+			const anthropicResponse = {
+				id: messageId,
+				type: 'message',
+				role: 'assistant',
+				content: [{ type: 'text', text: textContent }],
+				model: req.model || model,
+				stop_reason: 'end_turn',
+				stop_sequence: null,
+				usage: {
+					input_tokens: geminiResponse.usageMetadata?.promptTokenCount || 0,
+					output_tokens: geminiResponse.usageMetadata?.candidatesTokenCount || 0
+				}
+			};
+
+			return new Response(JSON.stringify(anthropicResponse), {
+				headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
+			});
 		}
 	}
 }
