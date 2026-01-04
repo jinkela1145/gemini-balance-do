@@ -1696,22 +1696,50 @@ export class LoadBalancer extends DurableObject {
 							});
 						}
 					} else if (block.type === 'tool_use') {
-						// Ensure there is some thought/text before function call for Gemini 2.0 Thinking models
-						// Check if previous part is text, if not add one
-						const lastPart = parts[parts.length - 1];
-						if (!lastPart || !lastPart.text) {
-							parts.push({ text: "Thinking about tool execution..." });
+						// Claude tool_use -> Gemini functionCall
+						// Check for embedded thought signature in ID
+						let thoughtData: any = {};
+						if (block.id && block.id.includes('__THOUGHT__')) {
+							const [realId, encodedThought] = block.id.split('__THOUGHT__');
+							try {
+								thoughtData = JSON.parse(atob(encodedThought));
+								block.id = realId; // Restore clean ID for internal mapping if needed
+								// Note: We don't change block.id in the loop because we might need strict matching? 
+								// Actually, map logic uses block.id. We should probably keep using the full ID in the map if the client sends it back full.
+								// But the client sends tool_result with tool_use_id. 
+								// If we send tool_use with ID "X__T__Y", client will return result with tool_use_id "X__T__Y".
+								// So we can extract it from the tool_use_id in the *tool_result* block processing or here in the assistant message processing.
+							} catch (e) { console.error('Failed to decode thought signature', e); }
 						}
 
-						// Claude tool_use -> Gemini functionCall
-						parts.push({
+						const part: any = {
 							functionCall: {
 								name: block.name,
 								args: block.input || {}
 							}
-						});
+						};
+
+						// Merge thought data back into the part
+						if (thoughtData) {
+							Object.assign(part, thoughtData);
+						}
+
+						parts.push(part);
 					} else if (block.type === 'tool_result') {
 						// Claude tool_result -> Gemini functionResponse
+						// Extract real ID if it contains thought signature (though here we just need the name)
+						let toolUseId = block.tool_use_id;
+						if (toolUseId.includes('__THOUGHT__')) {
+							toolUseId = toolUseId.split('__THOUGHT__')[0];
+						}
+
+						// We need to match the ID from the previous turn. 
+						// The map `toolIdToName` was built from `block.id`. 
+						// If `block.id` in assistant message had the signature, then `toolIdToName` has the full ID.
+						// And `block.tool_use_id` in tool_result should also have the full ID.
+						// So strict matching should work without splitting, strictly speaking.
+						// BUT, for the cleaner Lookups, let's trust the Map.
+
 						const functionName = toolIdToName.get(block.tool_use_id);
 						if (functionName) {
 							parts.push({
@@ -1820,7 +1848,23 @@ export class LoadBalancer extends DurableObject {
 									} else if (part.functionCall) {
 										// Gemini functionCall -> Claude tool_use
 										self.contentBlockIndex++;
-										const toolId = 'toolu_' + Math.random().toString(36).substring(2, 15);
+										let toolId = 'toolu_' + Math.random().toString(36).substring(2, 15);
+
+										// Capture thought signature if present
+										const captureFields: any = {};
+										if (part.thought) captureFields.thought = part.thought;
+										if (part.thought_signature) captureFields.thought_signature = part.thought_signature; // Standard name for 3.0?
+										// Check other keys just in case
+										for (const k in part) {
+											if (k !== 'functionCall' && k !== 'text') captureFields[k] = part[k];
+										}
+
+										if (Object.keys(captureFields).length > 0) {
+											// Embed signature in ID
+											const encoded = btoa(JSON.stringify(captureFields));
+											toolId = `${toolId}__THOUGHT__${encoded}`;
+										}
+
 										controller.enqueue(`event: content_block_start\ndata: ${JSON.stringify({
 											type: 'content_block_start',
 											index: self.contentBlockIndex,
@@ -1931,9 +1975,25 @@ export class LoadBalancer extends DurableObject {
 				} else if (part.functionCall) {
 					// Gemini functionCall -> Claude tool_use
 					stopReason = 'tool_use';
+					let toolId = 'toolu_' + Math.random().toString(36).substring(2, 15);
+
+					// Capture thought signature if present
+					const captureFields: any = {};
+					if (part.thought) captureFields.thought = part.thought;
+					if (part.thought_signature) captureFields.thought_signature = part.thought_signature;
+					// Check other keys just in case
+					for (const k in part) {
+						if (k !== 'functionCall' && k !== 'text') captureFields[k] = part[k];
+					}
+
+					if (Object.keys(captureFields).length > 0) {
+						const encoded = btoa(JSON.stringify(captureFields));
+						toolId = `${toolId}__THOUGHT__${encoded}`;
+					}
+
 					content.push({
 						type: 'tool_use',
-						id: 'toolu_' + Math.random().toString(36).substring(2, 15),
+						id: toolId,
 						name: part.functionCall.name,
 						input: part.functionCall.args || {}
 					});
