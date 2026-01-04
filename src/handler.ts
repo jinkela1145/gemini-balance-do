@@ -1601,28 +1601,9 @@ export class LoadBalancer extends DurableObject {
 	}
 
 	private async handleAnthropicMessages(req: any, apiKey: string): Promise<Response> {
-		// Map Claude model to Gemini model
-		const modelMap: Record<string, string> = {
-			'claude-3-opus': 'gemini-2.5-pro',
-			'claude-3-sonnet': 'gemini-2.5-flash',
-			'claude-3-haiku': 'gemini-2.0-flash',
-			'claude-3-5-sonnet': 'gemini-2.5-flash',
-			'claude-3-5-haiku': 'gemini-2.0-flash',
-		};
-
 		let model = 'gemini-2.5-flash';
-		if (req.model) {
-			// Check for direct mapping
-			for (const [claudeModel, geminiModel] of Object.entries(modelMap)) {
-				if (req.model.includes(claudeModel)) {
-					model = geminiModel;
-					break;
-				}
-			}
-			// If model starts with gemini-, use it directly
-			if (req.model.startsWith('gemini-')) {
-				model = req.model;
-			}
+		if (req.model && typeof req.model === 'string') {
+			model = req.model;
 		}
 
 		// Convert Claude messages to Gemini format
