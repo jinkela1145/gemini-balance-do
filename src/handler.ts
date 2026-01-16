@@ -1706,8 +1706,10 @@ export class LoadBalancer extends DurableObject {
 						let thoughtData: any = {};
 						try {
 							const row = this.ctx.storage.sql.exec("SELECT signature_data FROM tool_signatures WHERE tool_id = ?", block.id).one();
+							console.log(`[DEBUG] Looking up thought signature for tool_id=${block.id}, found=${!!row}`);
 							if (row && row.signature_data) {
 								thoughtData = JSON.parse(row.signature_data as string);
+								console.log(`[DEBUG] Retrieved thought data:`, JSON.stringify(thoughtData).substring(0, 200));
 							}
 						} catch (e) { console.error('Error looking up thought signature', e); }
 
@@ -1719,8 +1721,9 @@ export class LoadBalancer extends DurableObject {
 						};
 
 						// Merge thought data back into the part
-						if (thoughtData) {
+						if (Object.keys(thoughtData).length > 0) {
 							Object.assign(part, thoughtData);
+							console.log(`[DEBUG] Merged thought data into functionCall part`);
 						}
 
 						parts.push(part);
@@ -1859,9 +1862,13 @@ export class LoadBalancer extends DurableObject {
 
 										if (Object.keys(captureFields).length > 0) {
 											// Save signature to DB
+											console.log(`[DEBUG] Saving thought signature for toolId=${toolId}, fields:`, Object.keys(captureFields));
 											try {
 												db.exec("INSERT INTO tool_signatures (tool_id, signature_data, created_at) VALUES (?, ?, ?)", toolId, JSON.stringify(captureFields), Date.now());
+												console.log(`[DEBUG] Successfully saved thought signature`);
 											} catch (e) { console.error('Error saving thought signature', e); }
+										} else {
+											console.log(`[DEBUG] No thought fields found in Gemini response for toolId=${toolId}, part keys:`, Object.keys(part));
 										}
 
 										controller.enqueue(`event: content_block_start\ndata: ${JSON.stringify({
