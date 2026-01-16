@@ -245,16 +245,13 @@ export class LoadBalancer extends DurableObject {
 			return this.handleAnthropic(request);
 		}
 
-		// Handle direct /models or /v1beta/models requests
-		if (pathname.endsWith('/models') || pathname.endsWith('/v1beta/models')) {
-			const apiKey = await this.getRandomApiKey();
-			if (!apiKey) {
-				return new Response(JSON.stringify({ error: 'No API keys configured' }), {
-					status: 500,
-					headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
-				});
-			}
-			return this.handleModels(apiKey);
+		// Handle direct Gemini-native /models requests (return Gemini format)
+		// Note: /v1/models is already handled above by handleOpenAI (returns OpenAI format)
+		if (pathname === '/models' || pathname === '/v1beta/models' || pathname.endsWith('/v1beta/models')) {
+			// Rewrite bare /models to /v1beta/models for correct Google API path
+			const modelsPath = pathname === '/models' ? '/v1beta/models' : pathname;
+			const targetUrl = `${BASE_URL}${modelsPath}${search}`;
+			return this.forwardRequestWithLoadBalancing(targetUrl, request);
 		}
 
 
