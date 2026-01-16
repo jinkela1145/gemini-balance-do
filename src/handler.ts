@@ -1822,6 +1822,7 @@ export class LoadBalancer extends DurableObject {
 				inputTokens: 0,
 				outputTokens: 0,
 				contentBlockIndex: 0,
+				hasToolUse: false,
 				async transform(chunk: string, controller: TransformStreamDefaultController) {
 					const self = this as any;
 					self.buffer += chunk;
@@ -1849,6 +1850,7 @@ export class LoadBalancer extends DurableObject {
 									} else if (part.functionCall) {
 										// Gemini functionCall -> Claude tool_use
 										self.contentBlockIndex++;
+										self.hasToolUse = true;
 										let toolId = 'toolu_' + Math.random().toString(36).substring(2, 15);
 
 										// Capture thought signature if present
@@ -1912,10 +1914,11 @@ export class LoadBalancer extends DurableObject {
 						type: 'content_block_stop',
 						index: self.contentBlockIndex
 					})}\n\n`);
-					// Send message delta with stop reason
+					// Send message delta with correct stop reason
+					const stopReason = self.hasToolUse ? 'tool_use' : 'end_turn';
 					controller.enqueue(`event: message_delta\ndata: ${JSON.stringify({
 						type: 'message_delta',
-						delta: { stop_reason: 'end_turn', stop_sequence: null },
+						delta: { stop_reason: stopReason, stop_sequence: null },
 						usage: { output_tokens: self.outputTokens }
 					})}\n\n`);
 					// Always send message_stop to properly terminate the stream
