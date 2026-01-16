@@ -74,9 +74,32 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 						<span class="block">当前 HOME_ACCESS_KEY 或 AUTH_KEY 为默认值，请尽快修改环境变量并重新部署 Worker！</span>
 					</div>
 				)}
-				<div class="flex h-screen">
-					<div class="w-64 bg-slate-800 text-white p-4 flex flex-col">
-						<h1 class="text-2xl font-bold mb-8 text-sky-400">管理面板</h1>
+				<div class="flex h-screen relative">
+					{/* 移动端汉堡菜单按钮 */}
+					<button
+						id="sidebar-toggle"
+						class="lg:hidden fixed top-4 left-4 z-50 p-2 bg-slate-800 text-white rounded-lg shadow-lg hover:bg-slate-700 transition-colors"
+					>
+						<svg id="menu-icon" class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path>
+						</svg>
+						<svg id="close-icon" class="w-6 h-6 hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+						</svg>
+					</button>
+
+					{/* 遮罩层 */}
+					<div
+						id="sidebar-backdrop"
+						class="lg:hidden fixed inset-0 bg-black/50 z-30 hidden transition-opacity"
+					></div>
+
+					{/* 侧边栏 */}
+					<div
+						id="sidebar"
+						class="fixed lg:relative w-64 h-full bg-slate-800 text-white p-4 flex flex-col z-40 transform -translate-x-full lg:translate-x-0 transition-transform duration-300 ease-in-out"
+					>
+						<h1 class="text-2xl font-bold mb-8 text-sky-400 mt-12 lg:mt-0">管理面板</h1>
 						<nav class="flex flex-col space-y-2">
 							<a href="#" id="nav-keys-list" class="block py-2.5 px-4 rounded-lg bg-slate-700 transition-colors">
 								密钥列表
@@ -89,7 +112,7 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 							</a>
 						</nav>
 					</div>
-					<div class="flex-1 p-8 overflow-y-auto">
+					<div class="flex-1 p-8 pt-16 lg:pt-8 overflow-y-auto">
 						<div id="page-keys-list">
 							<h2 class="text-3xl font-bold mb-6 text-slate-700">密钥列表</h2>
 							<div class="bg-white p-6 rounded-lg shadow-sm">
@@ -266,6 +289,47 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 										const pageSize = 50;
 										let totalPages = 1;
 
+										// 侧边栏切换逻辑
+										const sidebarToggle = document.getElementById('sidebar-toggle');
+										const sidebar = document.getElementById('sidebar');
+										const sidebarBackdrop = document.getElementById('sidebar-backdrop');
+										const menuIcon = document.getElementById('menu-icon');
+										const closeIcon = document.getElementById('close-icon');
+
+										const toggleSidebar = (show) => {
+											if (show) {
+												sidebar.classList.remove('-translate-x-full');
+												sidebarBackdrop.classList.remove('hidden');
+												menuIcon.classList.add('hidden');
+												closeIcon.classList.remove('hidden');
+											} else {
+												sidebar.classList.add('-translate-x-full');
+												sidebarBackdrop.classList.add('hidden');
+												menuIcon.classList.remove('hidden');
+												closeIcon.classList.add('hidden');
+											}
+										};
+
+										if (sidebarToggle) {
+											sidebarToggle.addEventListener('click', () => {
+												const isOpen = !sidebar.classList.contains('-translate-x-full');
+												toggleSidebar(!isOpen);
+											});
+										}
+
+										if (sidebarBackdrop) {
+											sidebarBackdrop.addEventListener('click', () => {
+												toggleSidebar(false);
+											});
+										}
+
+										// 点击导航项后在移动端关闭侧边栏
+										const closeSidebarOnNav = () => {
+											if (window.innerWidth < 1024) {
+												toggleSidebar(false);
+											}
+										};
+
 										const showPage = (pageId) => {
 											[pageKeysList, pageAddKeys, pageStats].forEach(page => {
 												if (page && page.id === pageId) {
@@ -291,16 +355,19 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 										navKeysList.addEventListener('click', (e) => {
 											e.preventDefault();
 											showPage('page-keys-list');
+											closeSidebarOnNav();
 										});
 
 										navAddKeys.addEventListener('click', (e) => {
 											e.preventDefault();
 											showPage('page-add-keys');
+											closeSidebarOnNav();
 										});
 
 										navStats.addEventListener('click', (e) => {
 											e.preventDefault();
 											showPage('page-stats');
+											closeSidebarOnNav();
 										});
 
 										// 统计数据获取和渲染
