@@ -1513,19 +1513,37 @@ export class LoadBalancer extends DurableObject {
 		const authHeader = request.headers.get('Authorization');
 		apiKey = authHeader?.replace('Bearer ', '') ?? null;
 
+		const url = new URL(request.url);
+		const pathname = url.pathname;
+		const isModelsRequest = pathname.endsWith('/models');
+
 		// 如果启用了客户端 key 透传，直接使用客户端提供的 key
 		if (this.env.FORWARD_CLIENT_KEY_ENABLED) {
 			if (!apiKey) {
-				return new Response('No API key found in the client headers,please check your request!', { status: 400 });
+				// 对 /models 请求允许无 auth，自动获取 key
+				if (isModelsRequest) {
+					apiKey = await this.getRandomApiKey();
+					if (!apiKey) {
+						return new Response('No API keys configured in the load balancer.', { status: 500 });
+					}
+				} else {
+					return new Response('No API key found in the client headers,please check your request!', { status: 400 });
+				}
 			}
 			// 直接使用客户端的 API key，不需要验证
 		} else {
 			// 传统模式：验证 AUTH_KEY 并使用负载均衡
 			if (!apiKey) {
-				return new Response('No API key found in the client headers,please check your request!', { status: 400 });
-			}
-
-			if (authKey) {
+				// 对 /models 请求允许无 auth，自动获取 key
+				if (isModelsRequest) {
+					apiKey = await this.getRandomApiKey();
+					if (!apiKey) {
+						return new Response('No API keys configured in the load balancer.', { status: 500 });
+					}
+				} else {
+					return new Response('No API key found in the client headers,please check your request!', { status: 400 });
+				}
+			} else if (authKey) {
 				const token = authHeader?.replace('Bearer ', '');
 				if (token !== authKey) {
 					return new Response('Unauthorized', { status: 401, headers: fixCors({}).headers });
@@ -1536,9 +1554,6 @@ export class LoadBalancer extends DurableObject {
 				}
 			}
 		}
-
-		const url = new URL(request.url);
-		const pathname = url.pathname;
 
 		const assert = (success: Boolean) => {
 			if (!success) {
