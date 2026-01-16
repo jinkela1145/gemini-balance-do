@@ -247,7 +247,14 @@ export class LoadBalancer extends DurableObject {
 
 		// Handle direct /models or /v1beta/models requests
 		if (pathname.endsWith('/models') || pathname.endsWith('/v1beta/models')) {
-			return this.handleModels(this.env.AUTH_KEY || '');
+			const apiKey = await this.getRandomApiKey();
+			if (!apiKey) {
+				return new Response(JSON.stringify({ error: 'No API keys configured' }), {
+					status: 500,
+					headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
+				});
+			}
+			return this.handleModels(apiKey);
 		}
 
 

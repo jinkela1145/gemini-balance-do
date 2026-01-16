@@ -102,10 +102,10 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 						<h1 class="text-2xl font-bold mb-8 text-sky-400 mt-12 lg:mt-0">管理面板</h1>
 						<nav class="flex flex-col space-y-2">
 							<a href="#" id="nav-keys-list" class="block py-2.5 px-4 rounded-lg bg-slate-700 transition-colors">
-								密钥列表
+								🔑 密钥列表
 							</a>
 							<a href="#" id="nav-add-keys" class="block py-2.5 px-4 rounded-lg hover:bg-slate-700 transition-colors">
-								添加密钥
+								➕ 添加密钥
 							</a>
 							<a href="#" id="nav-stats" class="block py-2.5 px-4 rounded-lg hover:bg-slate-700 transition-colors">
 								📊 统计面板
