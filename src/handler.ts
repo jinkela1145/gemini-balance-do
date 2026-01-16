@@ -1907,11 +1907,19 @@ export class LoadBalancer extends DurableObject {
 				},
 				flush(controller: TransformStreamDefaultController) {
 					const self = this as any;
+					// Close the content block
+					controller.enqueue(`event: content_block_stop\ndata: ${JSON.stringify({
+						type: 'content_block_stop',
+						index: self.contentBlockIndex
+					})}\n\n`);
+					// Send message delta with stop reason
 					controller.enqueue(`event: message_delta\ndata: ${JSON.stringify({
 						type: 'message_delta',
 						delta: { stop_reason: 'end_turn', stop_sequence: null },
 						usage: { output_tokens: self.outputTokens }
 					})}\n\n`);
+					// Always send message_stop to properly terminate the stream
+					controller.enqueue(`event: message_stop\ndata: {"type":"message_stop"}\n\n`);
 				}
 			} as any);
 
