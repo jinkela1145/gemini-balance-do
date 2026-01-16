@@ -52,7 +52,6 @@ export class LoadBalancer extends DurableObject {
 				last_checked_at INTEGER,
 				failed_count INTEGER NOT NULL DEFAULT 0,
 				key_group TEXT CHECK(key_group IN ('normal', 'abnormal')) NOT NULL DEFAULT 'normal',
-				key_type TEXT CHECK(key_type IN ('free', 'paid')) NOT NULL DEFAULT 'free',
 				usage_count INTEGER NOT NULL DEFAULT 0,
 				response_time_avg INTEGER NOT NULL DEFAULT 0,
 				last_used_at INTEGER,
@@ -77,11 +76,6 @@ export class LoadBalancer extends DurableObject {
 				identifier TEXT PRIMARY KEY,
 				request_count INTEGER DEFAULT 0,
 				window_start INTEGER
-			);
-			CREATE TABLE IF NOT EXISTS paid_model_rules (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				pattern TEXT NOT NULL UNIQUE,
-				created_at INTEGER
 			);
 		`);
 		this.ctx.storage.setAlarm(Date.now() + 5 * 60 * 1000); // Set an alarm to run in 5 minutes
@@ -192,7 +186,7 @@ export class LoadBalancer extends DurableObject {
 		}
 
 		// 管理 API 权限校验（使用 HOME_ACCESS_KEY）
-		if (pathname === '/api/keys' || pathname === '/api/keys/check' || pathname === '/api/stats' || pathname === '/api/paid-rules') {
+		if (pathname === '/api/keys' || pathname === '/api/keys/check' || pathname === '/api/stats') {
 			if (!isAdminAuthenticated(request, this.env.HOME_ACCESS_KEY)) {
 				return new Response(JSON.stringify({ error: 'Unauthorized' }), {
 					status: 401,
@@ -213,12 +207,6 @@ export class LoadBalancer extends DurableObject {
 			}
 			if (pathname === '/api/stats' && request.method === 'GET') {
 				return this.getRequestStats();
-			}
-			if (pathname === '/api/paid-rules' && request.method === 'GET') {
-				return this.getPaidModelRules();
-			}
-			if (pathname === '/api/paid-rules' && request.method === 'POST') {
-				return this.savePaidModelRules(request);
 			}
 		}
 
@@ -371,19 +359,8 @@ export class LoadBalancer extends DurableObject {
 			const usedKeys: Set<string> = new Set();
 			let lastResponse: Response | null = null;
 
-			// 从 URL 提取模型名称并检查是否需要使用付费密钥
-			const modelMatch = url.pathname.match(/models\/([^/:]+)/);
-			const model = modelMatch ? modelMatch[1] : '';
-			const usePaidKey = model ? await this.matchPaidModelRules(model) : false;
-			const keyType = usePaidKey ? 'paid' : undefined; // undefined 表示不限制类型
-
 			for (let attempt = 0; attempt <= maxRetries; attempt++) {
-				// 如果需要付费密钥但没有找到，降级到免费密钥
-				let apiKey = await this.getRandomApiKey(usedKeys, keyType);
-				if (!apiKey && usePaidKey) {
-					console.log(`[LoadBalance] No paid keys available, falling back to free keys`);
-					apiKey = await this.getRandomApiKey(usedKeys, 'free');
-				}
+				const apiKey = await this.getRandomApiKey(usedKeys);
 				if (!apiKey) {
 					if (lastResponse) return lastResponse;
 					return new Response('No API keys configured in the load balancer.', { status: 500 });
@@ -1306,7 +1283,7 @@ export class LoadBalancer extends DurableObject {
 
 	async handleApiKeys(request: Request): Promise<Response> {
 		try {
-			const { keys, keyType = 'free' } = (await request.json()) as { keys: string[]; keyType?: 'free' | 'paid' };
+			const { keys } = (await request.json()) as { keys: string[] };
 			if (!Array.isArray(keys) || keys.length === 0) {
 				return new Response(JSON.stringify({ error: '请求体无效，需要一个包含key的非空数组。' }), {
 					status: 400,
@@ -1314,19 +1291,12 @@ export class LoadBalancer extends DurableObject {
 				});
 			}
 
-			const validKeyType = keyType === 'paid' ? 'paid' : 'free';
-
 			for (const key of keys) {
 				await this.ctx.storage.sql.exec('INSERT OR IGNORE INTO api_keys (api_key) VALUES (?)', key);
-				await this.ctx.storage.sql.exec(
-					'INSERT INTO api_key_statuses (api_key, key_type) VALUES (?, ?) ON CONFLICT(api_key) DO UPDATE SET key_type = ?',
-					key,
-					validKeyType,
-					validKeyType
-				);
+				await this.ctx.storage.sql.exec('INSERT OR IGNORE INTO api_key_statuses (api_key) VALUES (?)', key);
 			}
 
-			return new Response(JSON.stringify({ message: `${validKeyType === 'paid' ? '付费' : '免费'}密钥添加成功。` }), {
+			return new Response(JSON.stringify({ message: 'API密钥添加成功。' }), {
 				status: 200,
 				headers: { 'Content-Type': 'application/json' },
 			});
@@ -1434,7 +1404,7 @@ export class LoadBalancer extends DurableObject {
 			const total = totalArray.length > 0 ? totalArray[0][0] : 0;
 
 			const results = await this.ctx.storage.sql
-				.exec('SELECT api_key, status, key_group, last_checked_at, failed_count, key_type FROM api_key_statuses LIMIT ? OFFSET ?', pageSize, offset)
+				.exec('SELECT api_key, status, key_group, last_checked_at, failed_count FROM api_key_statuses LIMIT ? OFFSET ?', pageSize, offset)
 				.raw<any>();
 			const keys = results
 				? Array.from(results).map((row: any) => ({
@@ -1443,7 +1413,6 @@ export class LoadBalancer extends DurableObject {
 					key_group: row[2],
 					last_checked_at: row[3],
 					failed_count: row[4],
-					key_type: row[5] || 'free',
 				}))
 				: [];
 
@@ -1456,87 +1425,6 @@ export class LoadBalancer extends DurableObject {
 				status: 500,
 				headers: { 'Content-Type': 'application/json' },
 			});
-		}
-	}
-
-	// =================================================================================================
-	// Paid Model Rules API
-	// =================================================================================================
-
-	async getPaidModelRules(): Promise<Response> {
-		try {
-			const results = await this.ctx.storage.sql
-				.exec('SELECT id, pattern, created_at FROM paid_model_rules ORDER BY id ASC')
-				.raw<any>();
-			const rules = Array.from(results).map((row: any) => ({
-				id: row[0],
-				pattern: row[1],
-				created_at: row[2],
-			}));
-			return new Response(JSON.stringify({ rules }), {
-				headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
-			});
-		} catch (error: any) {
-			console.error('获取付费规则失败:', error);
-			return new Response(JSON.stringify({ error: error.message || '内部服务器错误' }), {
-				status: 500,
-				headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
-			});
-		}
-	}
-
-	async savePaidModelRules(request: Request): Promise<Response> {
-		try {
-			const { patterns } = (await request.json()) as { patterns: string[] };
-			if (!Array.isArray(patterns)) {
-				return new Response(JSON.stringify({ error: '请求体无效' }), {
-					status: 400,
-					headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
-				});
-			}
-
-			// 清空现有规则并插入新规则
-			await this.ctx.storage.sql.exec('DELETE FROM paid_model_rules');
-			for (const pattern of patterns.filter(p => p.trim())) {
-				await this.ctx.storage.sql.exec(
-					'INSERT OR IGNORE INTO paid_model_rules (pattern, created_at) VALUES (?, ?)',
-					pattern.trim(),
-					Date.now()
-				);
-			}
-
-			return new Response(JSON.stringify({ message: '付费模型规则保存成功' }), {
-				headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
-			});
-		} catch (error: any) {
-			console.error('保存付费规则失败:', error);
-			return new Response(JSON.stringify({ error: error.message || '内部服务器错误' }), {
-				status: 500,
-				headers: fixCors({ headers: { 'Content-Type': 'application/json' } }).headers,
-			});
-		}
-	}
-
-	// 检查模型是否匹配付费规则
-	private async matchPaidModelRules(model: string): Promise<boolean> {
-		try {
-			const results = await this.ctx.storage.sql
-				.exec('SELECT pattern FROM paid_model_rules')
-				.raw<any>();
-			const patterns = Array.from(results).map((row: any) => row[0] as string);
-
-			for (const pattern of patterns) {
-				// 将通配符转换为正则表达式
-				const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$', 'i');
-				if (regex.test(model)) {
-					console.log(`[PaidRules] Model "${model}" matched pattern "${pattern}"`);
-					return true;
-				}
-			}
-			return false;
-		} catch (error) {
-			console.error('匹配付费规则失败:', error);
-			return false;
 		}
 	}
 
@@ -1568,16 +1456,13 @@ export class LoadBalancer extends DurableObject {
 		return null;
 	}
 
-	private async getRandomApiKey(excludeKeys?: Set<string>, keyType?: 'free' | 'paid'): Promise<string | null> {
+	private async getRandomApiKey(excludeKeys?: Set<string>): Promise<string | null> {
 		try {
 			const strategy = this.env.LOAD_BALANCE_STRATEGY ?? 'random';
 			const excludeArray = excludeKeys ? Array.from(excludeKeys) : [];
 			const excludePlaceholders = excludeArray.length > 0
 				? `AND api_key NOT IN (${excludeArray.map(() => '?').join(',')})`
 				: '';
-
-			// 如果指定了 keyType，添加过滤条件
-			const keyTypeFilter = keyType ? `AND key_type = '${keyType}'` : '';
 
 			// 根据策略选择排序方式
 			let orderBy: string;
@@ -1593,26 +1478,26 @@ export class LoadBalancer extends DurableObject {
 			}
 
 			// First, try to get a key from the normal group
-			const normalQuery = `SELECT api_key FROM api_key_statuses WHERE key_group = 'normal' ${keyTypeFilter} ${excludePlaceholders} ${orderBy} LIMIT 1`;
+			const normalQuery = `SELECT api_key FROM api_key_statuses WHERE key_group = 'normal' ${excludePlaceholders} ${orderBy} LIMIT 1`;
 			let results = await this.ctx.storage.sql
 				.exec(normalQuery, ...excludeArray)
 				.raw<any>();
 			let keys = Array.from(results);
 			if (keys && keys.length > 0) {
 				const key = keys[0][0] as string;
-				console.log(`[LoadBalance] Selected API Key from normal group (${strategy}, ${keyType || 'any'}): ...${key.slice(-6)}`);
+				console.log(`[LoadBalance] Selected API Key from normal group (${strategy}): ...${key.slice(-6)}`);
 				return key;
 			}
 
 			// If no keys in normal group, try the abnormal group
-			const abnormalQuery = `SELECT api_key FROM api_key_statuses WHERE key_group = 'abnormal' ${keyTypeFilter} ${excludePlaceholders} ${orderBy} LIMIT 1`;
+			const abnormalQuery = `SELECT api_key FROM api_key_statuses WHERE key_group = 'abnormal' ${excludePlaceholders} ${orderBy} LIMIT 1`;
 			results = await this.ctx.storage.sql
 				.exec(abnormalQuery, ...excludeArray)
 				.raw<any>();
 			keys = Array.from(results);
 			if (keys && keys.length > 0) {
 				const key = keys[0][0] as string;
-				console.log(`[LoadBalance] Selected API Key from abnormal group (${strategy}, ${keyType || 'any'}): ...${key.slice(-6)}`);
+				console.log(`[LoadBalance] Selected API Key from abnormal group (${strategy}): ...${key.slice(-6)}`);
 				return key;
 			}
 

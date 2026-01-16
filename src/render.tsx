@@ -107,9 +107,6 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 							<a href="#" id="nav-add-keys" class="block py-2.5 px-4 rounded-lg hover:bg-slate-700 transition-colors">
 								➕ 添加密钥
 							</a>
-							<a href="#" id="nav-paid-rules" class="block py-2.5 px-4 rounded-lg hover:bg-slate-700 transition-colors">
-								💰 付费规则
-							</a>
 							<a href="#" id="nav-stats" class="block py-2.5 px-4 rounded-lg hover:bg-slate-700 transition-colors">
 								📊 统计面板
 							</a>
@@ -150,7 +147,6 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 													<input type="checkbox" id="select-all-keys" class="rounded border-slate-300" />
 												</th>
 												<th class="p-3 text-slate-600 font-semibold">API 密钥</th>
-												<th class="p-3 text-slate-600 font-semibold">类型</th>
 												<th class="p-3 text-slate-600 font-semibold">状态</th>
 												<th class="p-3 text-slate-600 font-semibold">分组</th>
 												<th class="p-3 text-slate-600 font-semibold">最后检查时间</th>
@@ -195,52 +191,13 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 										class="w-full h-48 p-3 border rounded-lg bg-slate-50 focus:ring-2 focus:ring-teal-500 focus:border-teal-500 transition"
 										placeholder="请输入API密钥，每行一个"
 									></textarea>
-									<div class="mt-4 flex gap-4">
-										<button
-											type="button"
-											id="add-free-keys-btn"
-											class="flex-1 px-4 py-2.5 bg-sky-500 text-white rounded-lg hover:bg-sky-600 transition-colors shadow-sm"
-										>
-											➕ 添加免费密钥
-										</button>
-										<button
-											type="button"
-											id="add-paid-keys-btn"
-											class="flex-1 px-4 py-2.5 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 transition-colors shadow-sm"
-										>
-											💰 添加付费密钥
-										</button>
-									</div>
+									<button
+										type="submit"
+										class="mt-4 w-full px-4 py-2.5 bg-sky-500 text-white rounded-lg hover:bg-sky-600 transition-colors shadow-sm"
+									>
+										添加密钥
+									</button>
 								</form>
-							</div>
-						</div>
-						<div id="page-paid-rules" class="hidden">
-							<h2 class="text-3xl font-bold mb-6 text-slate-700">💰 付费规则</h2>
-							<div class="bg-white p-6 rounded-lg shadow-sm mb-6">
-								<h3 class="text-xl font-semibold mb-4 text-slate-600">付费模型规则</h3>
-								<p class="text-sm text-slate-500 mb-4">
-									配置哪些模型使用付费密钥。每行一个规则，支持通配符 * 匹配任意字符。
-								</p>
-								<textarea
-									id="paid-rules-input"
-									class="w-full h-48 p-3 border rounded-lg bg-slate-50 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 transition font-mono text-sm"
-									placeholder="gemini-2.0-pro&#10;gemini-ultra&#10;*-exp-*"
-								></textarea>
-								<button
-									id="save-paid-rules-btn"
-									class="mt-4 px-6 py-2.5 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 transition-colors shadow-sm"
-								>
-									💾 保存规则
-								</button>
-							</div>
-							<div class="bg-slate-50 p-4 rounded-lg border border-slate-200">
-								<h4 class="font-semibold text-slate-700 mb-2">使用说明</h4>
-								<ul class="text-sm text-slate-600 space-y-1">
-									<li>• 精确匹配：<code class="bg-slate-200 px-1 rounded">gemini-2.0-pro</code></li>
-									<li>• 前缀匹配：<code class="bg-slate-200 px-1 rounded">gemini-ultra*</code></li>
-									<li>• 包含匹配：<code class="bg-slate-200 px-1 rounded">*-exp-*</code></li>
-									<li>• 如果付费密钥用完，会自动降级到免费密钥</li>
-								</ul>
 							</div>
 						</div>
 						<div id="page-stats" class="hidden">
@@ -322,17 +279,11 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 
 										const navKeysList = document.getElementById('nav-keys-list');
 										const navAddKeys = document.getElementById('nav-add-keys');
-										const navPaidRules = document.getElementById('nav-paid-rules');
 										const navStats = document.getElementById('nav-stats');
 										const pageKeysList = document.getElementById('page-keys-list');
 										const pageAddKeys = document.getElementById('page-add-keys');
-										const pagePaidRules = document.getElementById('page-paid-rules');
 										const pageStats = document.getElementById('page-stats');
 										const refreshStatsBtn = document.getElementById('refresh-stats-btn');
-										const addFreeKeysBtn = document.getElementById('add-free-keys-btn');
-										const addPaidKeysBtn = document.getElementById('add-paid-keys-btn');
-										const paidRulesInput = document.getElementById('paid-rules-input');
-										const savePaidRulesBtn = document.getElementById('save-paid-rules-btn');
 
 										let currentPage = 1;
 										const pageSize = 50;
@@ -380,53 +331,44 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 										};
 
 										const showPage = (pageId) => {
-									[pageKeysList, pageAddKeys, pagePaidRules, pageStats].forEach(page => {
-										if (page && page.id === pageId) {
-											page.classList.remove('hidden');
-										} else if (page) {
-											page.classList.add('hidden');
-										}
-									});
-									[navKeysList, navAddKeys, navPaidRules, navStats].forEach(nav => {
-										if (nav && nav.id === 'nav-' + pageId.replace('page-', '')) {
-											nav.classList.add('bg-slate-700');
-											nav.classList.remove('hover:bg-slate-700');
-										} else if (nav) {
-											nav.classList.remove('bg-slate-700');
-											nav.classList.add('hover:bg-slate-700');
-										}
-									});
-									if (pageId === 'page-stats') {
-										fetchAndRenderStats();
-									}
-									if (pageId === 'page-paid-rules') {
-										fetchAndRenderPaidRules();
-									}
-								};
+											[pageKeysList, pageAddKeys, pageStats].forEach(page => {
+												if (page && page.id === pageId) {
+													page.classList.remove('hidden');
+												} else if (page) {
+													page.classList.add('hidden');
+												}
+											});
+											[navKeysList, navAddKeys, navStats].forEach(nav => {
+												if (nav && nav.id === 'nav-' + pageId.replace('page-', '')) {
+													nav.classList.add('bg-slate-700');
+													nav.classList.remove('hover:bg-slate-700');
+												} else if (nav) {
+													nav.classList.remove('bg-slate-700');
+													nav.classList.add('hover:bg-slate-700');
+												}
+											});
+											if (pageId === 'page-stats') {
+												fetchAndRenderStats();
+											}
+										};
 
-								navKeysList.addEventListener('click', (e) => {
-									e.preventDefault();
-									showPage('page-keys-list');
-									closeSidebarOnNav();
-								});
+										navKeysList.addEventListener('click', (e) => {
+											e.preventDefault();
+											showPage('page-keys-list');
+											closeSidebarOnNav();
+										});
 
-								navAddKeys.addEventListener('click', (e) => {
-									e.preventDefault();
-									showPage('page-add-keys');
-									closeSidebarOnNav();
-								});
+										navAddKeys.addEventListener('click', (e) => {
+											e.preventDefault();
+											showPage('page-add-keys');
+											closeSidebarOnNav();
+										});
 
-								navPaidRules.addEventListener('click', (e) => {
-									e.preventDefault();
-									showPage('page-paid-rules');
-									closeSidebarOnNav();
-								});
-
-								navStats.addEventListener('click', (e) => {
-									e.preventDefault();
-									showPage('page-stats');
-									closeSidebarOnNav();
-								});
+										navStats.addEventListener('click', (e) => {
+											e.preventDefault();
+											showPage('page-stats');
+											closeSidebarOnNav();
+										});
 
 										// 统计数据获取和渲染
 										const fetchAndRenderStats = async () => {
@@ -493,32 +435,27 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 												  totalPages = Math.ceil(total / pageSize);
 												  keysTableBody.innerHTML = '';
 												  if (keys.length === 0) {
-												    keysTableBody.innerHTML = '<tr><td colspan="8" class="p-2 text-center">暂无密钥</td></tr>';
+												    keysTableBody.innerHTML = '<tr><td colspan="7" class="p-2 text-center">暂无密钥</td></tr>';
 												  } else {
 												    keys.forEach(key => {
 												      const statusMap = { normal: '正常', abnormal: '异常' };
-								      const keyTypeMap = { free: '免费', paid: '付费' };
-								      const row = document.createElement('tr');
-								      row.className = 'hover:bg-slate-50 transition-colors';
-								      row.dataset.key = key.api_key;
-								      const keyTypeBadge = key.key_type === 'paid' 
-								        ? '<span class="px-2 py-1 rounded text-xs bg-emerald-100 text-emerald-700">💰 付费</span>'
-								        : '<span class="px-2 py-1 rounded text-xs bg-slate-100 text-slate-600">免费</span>';
-								      row.innerHTML = \`
-								        <td class="p-3 w-6"><input type="checkbox" class="key-checkbox rounded border-slate-300" data-key="\${key.api_key}" /></td>
-								        <td class="p-3 font-mono text-sm text-slate-700">\${key.api_key}</td>
-								        <td class="p-3">\${keyTypeBadge}</td>
-								        <td class="p-3 status-cell">\${statusMap[key.status] || key.status}</td>
-								        <td class="p-3">\${statusMap[key.key_group] || key.key_group}</td>
-								        <td class="p-3 text-sm text-slate-500">\${key.last_checked_at ? new Date(key.last_checked_at).toLocaleString() : 'N/A'}</td>
-								        <td class="p-3 text-center">\${key.failed_count}</td>
-								      \`;
+												      const row = document.createElement('tr');
+												      row.className = 'hover:bg-slate-50 transition-colors';
+												      row.dataset.key = key.api_key;
+												      row.innerHTML = \`
+												        <td class="p-3 w-6"><input type="checkbox" class="key-checkbox rounded border-slate-300" data-key="\${key.api_key}" /></td>
+												        <td class="p-3 font-mono text-sm text-slate-700">\${key.api_key}</td>
+												        <td class="p-3 status-cell">\${statusMap[key.status] || key.status}</td>
+												        <td class="p-3">\${statusMap[key.key_group] || key.key_group}</td>
+												        <td class="p-3 text-sm text-slate-500">\${key.last_checked_at ? new Date(key.last_checked_at).toLocaleString() : 'N/A'}</td>
+												        <td class="p-3 text-center">\${key.failed_count}</td>
+												      \`;
 												      keysTableBody.appendChild(row);
 												    });
 												  }
 												  updatePaginationControls();
 												} catch (error) {
-												  keysTableBody.innerHTML = '<tr><td colspan="8" class="p-2 text-center text-red-500">加载失败</td></tr>';
+												  keysTableBody.innerHTML = '<tr><td colspan="7" class="p-2 text-center text-red-500">加载失败</td></tr>';
 												  console.error('Failed to fetch keys:', error);
 												}
 										};
@@ -619,91 +556,56 @@ export const Render = ({ isAuthenticated, showWarning }: { isAuthenticated: bool
 											updateDeleteButtonVisibility();
 										});
 
-										// 添加密钥函数
-								const addKeys = async (keyType) => {
-									const keys = apiKeysTextarea.value.split('\n').map(k => k.trim()).filter(k => k !== '');
-									if (keys.length === 0) {
-										alert('请输入至少一个API密钥。');
-										return;
-									}
-									try {
-										const response = await fetch('/api/keys', {
-											method: 'POST',
-											headers: { 'Content-Type': 'application/json' },
-											body: JSON.stringify({ keys, keyType }),
+										addKeysForm.addEventListener('submit', async (e) => {
+												e.preventDefault();
+												const keys = apiKeysTextarea.value.split('\\n').map(k => k.trim()).filter(k => k !== '');
+												if (keys.length === 0) {
+												  alert('请输入至少一个API密钥。');
+												  return;
+												}
+												try {
+												  const response = await fetch('/api/keys', {
+												    method: 'POST',
+												    headers: { 'Content-Type': 'application/json' },
+												    body: JSON.stringify({ keys }),
+												  });
+												  const result = await response.json();
+												  if (response.ok) {
+												    alert(result.message || '密钥添加成功。');
+												    apiKeysTextarea.value = '';
+												    fetchAndRenderKeys();
+												  } else {
+												    alert(\`添加密钥失败: \${result.error || '未知错误'}\`);
+												  }
+												} catch (error) {
+												  alert('请求失败，请检查网络连接。');
+												  console.error('Failed to add keys:', error);
+												}
 										});
-										const result = await response.json();
-										if (response.ok) {
-											alert(result.message || '密钥添加成功。');
-											apiKeysTextarea.value = '';
-											fetchAndRenderKeys();
-										} else {
-											alert(\`添加密钥失败: \${result.error || '未知错误'}\`);
-										}
-									} catch (error) {
-										alert('请求失败，请检查网络连接。');
-										console.error('Failed to add keys:', error);
-									}
-								};
 
-								addFreeKeysBtn.addEventListener('click', () => addKeys('free'));
-								addPaidKeysBtn.addEventListener('click', () => addKeys('paid'));
-
-								// 付费规则相关函数
-								const fetchAndRenderPaidRules = async () => {
-									try {
-										const response = await fetch('/api/paid-rules');
-										if (!response.ok) throw new Error('Failed to fetch paid rules');
-										const data = await response.json();
-										paidRulesInput.value = data.rules.map(r => r.pattern).join('\n');
-									} catch (error) {
-										console.error('Failed to fetch paid rules:', error);
-									}
-								};
-
-								savePaidRulesBtn.addEventListener('click', async () => {
-									const patterns = paidRulesInput.value.split('\n').map(p => p.trim()).filter(p => p !== '');
-									try {
-										const response = await fetch('/api/paid-rules', {
-											method: 'POST',
-											headers: { 'Content-Type': 'application/json' },
-											body: JSON.stringify({ patterns }),
-										});
-										const result = await response.json();
-										if (response.ok) {
-											alert(result.message || '规则保存成功。');
-										} else {
-											alert(\`保存失败: \${result.error || '未知错误'}\`);
-										}
-									} catch (error) {
-					alert('请求失败，请检查网络连接。');
-				console.error('Failed to save paid rules:', error);
-									}
-								});
-
-				refreshKeysBtn.addEventListener('click', fetchAndRenderKeys);
+										refreshKeysBtn.addEventListener('click', fetchAndRenderKeys);
 
 										prevPageBtn.addEventListener('click', () => {
 												if (currentPage > 1) {
-					currentPage--;
-				fetchAndRenderKeys();
+												  currentPage--;
+												  fetchAndRenderKeys();
 												}
 										});
 
 										nextPageBtn.addEventListener('click', () => {
 												if (currentPage < totalPages) {
-					currentPage++;
-				fetchAndRenderKeys();
+												  currentPage++;
+												  fetchAndRenderKeys();
 												}
 										});
 
-				// Initial load
-				fetchAndRenderKeys();
+										// Initial load
+										fetchAndRenderKeys();
 								});
-				`,
+				  `,
 					}}
 				></script>
 			</body>
-		</html >
+		</html>
 	);
 };
