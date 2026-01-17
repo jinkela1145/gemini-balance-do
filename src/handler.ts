@@ -294,7 +294,7 @@ export class LoadBalancer extends DurableObject {
 	}
 
 	async forwardRequest(targetUrl: string, request: Request, headers: Headers, apiKey: string, cachedBody?: ArrayBuffer | null): Promise<Response> {
-		console.log(`Request Sending to Gemini: ${targetUrl}`);
+		// console.log(`Request Sending to Gemini: ${targetUrl}`);
 
 		// Use cached body if provided, otherwise use request.body
 		let body: BodyInit | null = null;
@@ -309,7 +309,7 @@ export class LoadBalancer extends DurableObject {
 		});
 
 		if (response.status === 429) {
-			console.log(`API key ${apiKey} received 429 status code.`);
+			// console.log(`API key ${apiKey} received 429 status code.`);
 			await this.ctx.storage.sql.exec(
 				"UPDATE api_key_statuses SET key_group = 'abnormal', failed_count = failed_count + 1, last_checked_at = ? WHERE api_key = ?",
 				Date.now(),
@@ -317,7 +317,7 @@ export class LoadBalancer extends DurableObject {
 			);
 		}
 
-		console.log('Call Gemini Success');
+		// console.log('Call Gemini Success');
 
 		const responseHeaders = new Headers(response.headers);
 		responseHeaders.set('Access-Control-Allow-Origin', '*');
@@ -399,7 +399,7 @@ export class LoadBalancer extends DurableObject {
 
 				// 可重试错误，记录并继续
 				lastResponse = response;
-				console.log(`[Retry] Attempt ${attempt + 1}/${maxRetries} failed with status ${response.status} for key ...${apiKey.slice(-6)}`);
+				// console.log(`[Retry] Attempt ${attempt + 1}/${maxRetries} failed with status ${response.status} for key ...${apiKey.slice(-6)}`);
 			}
 
 			return lastResponse ?? new Response('All retries exhausted', { status: 503 });
@@ -1498,7 +1498,7 @@ export class LoadBalancer extends DurableObject {
 			let keys = Array.from(results);
 			if (keys && keys.length > 0) {
 				const key = keys[0][0] as string;
-				console.log(`[LoadBalance] Selected API Key from normal group (${strategy}): ...${key.slice(-6)}`);
+				// console.log(`[LoadBalance] Selected API Key from normal group (${strategy}): ...${key.slice(-6)}`);
 				return key;
 			}
 
@@ -1510,7 +1510,7 @@ export class LoadBalancer extends DurableObject {
 			keys = Array.from(results);
 			if (keys && keys.length > 0) {
 				const key = keys[0][0] as string;
-				console.log(`[LoadBalance] Selected API Key from abnormal group (${strategy}): ...${key.slice(-6)}`);
+				// console.log(`[LoadBalance] Selected API Key from abnormal group (${strategy}): ...${key.slice(-6)}`);
 				return key;
 			}
 
@@ -1590,15 +1590,15 @@ export class LoadBalancer extends DurableObject {
 		let apiKey: string | null;
 
 		// Log Claude Code debugging info
-		console.log('--- Claude Code Request Debug ---');
-		console.log('Method:', request.method);
-		console.log('URL:', request.url);
-		console.log('Headers:', JSON.stringify(Object.fromEntries(request.headers)));
+		// console.log('--- Claude Code Request Debug ---');
+		// console.log('Method:', request.method);
+		// console.log('URL:', request.url);
+		// console.log('Headers:', JSON.stringify(Object.fromEntries(request.headers)));
 
 		const reqClone = request.clone();
 		const reqBody = await reqClone.text();
-		console.log('Body:', reqBody);
-		console.log('---------------------------------');
+		// console.log('Body:', reqBody);
+		// console.log('---------------------------------');
 
 		// Claude uses x-api-key header or Authorization header
 		const xApiKey = request.headers.get('x-api-key');
