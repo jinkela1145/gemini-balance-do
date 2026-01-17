@@ -293,13 +293,19 @@ export class LoadBalancer extends DurableObject {
 		return this.forwardRequestWithLoadBalancing(targetUrl, request);
 	}
 
-	async forwardRequest(targetUrl: string, request: Request, headers: Headers, apiKey: string): Promise<Response> {
+	async forwardRequest(targetUrl: string, request: Request, headers: Headers, apiKey: string, cachedBody?: ArrayBuffer | null): Promise<Response> {
 		console.log(`Request Sending to Gemini: ${targetUrl}`);
+
+		// Use cached body if provided, otherwise use request.body
+		let body: BodyInit | null = null;
+		if (request.method !== 'GET' && request.method !== 'HEAD') {
+			body = cachedBody !== undefined ? cachedBody : request.body;
+		}
 
 		const response = await fetch(targetUrl, {
 			method: request.method,
 			headers: headers,
-			body: request.method === 'GET' || request.method === 'HEAD' ? null : request.body,
+			body: body,
 		});
 
 		if (response.status === 429) {
@@ -338,6 +344,12 @@ export class LoadBalancer extends DurableObject {
 				headers.set('content-type', request.headers.get('content-type')!);
 			}
 
+			// Cache the request body for potential retries (ReadableStream can only be read once)
+			let cachedBody: ArrayBuffer | null = null;
+			if (request.method !== 'GET' && request.method !== 'HEAD' && request.body) {
+				cachedBody = await request.arrayBuffer();
+			}
+
 			if (this.env.FORWARD_CLIENT_KEY_ENABLED) {
 				// 提取客户端的 API key
 				const clientApiKey = this.extractClientApiKey(request, url);
@@ -348,7 +360,7 @@ export class LoadBalancer extends DurableObject {
 				}
 
 				const startTime = Date.now();
-				const response = await this.forwardRequest(url.toString(), request, headers, clientApiKey || '');
+				const response = await this.forwardRequest(url.toString(), request, headers, clientApiKey || '', cachedBody);
 				const responseTime = Date.now() - startTime;
 				await this.recordRequestStats(clientApiKey || '', url.pathname, responseTime, response.status);
 				return response;
@@ -373,7 +385,7 @@ export class LoadBalancer extends DurableObject {
 				requestHeaders.set('x-goog-api-key', apiKey);
 
 				const startTime = Date.now();
-				const response = await this.forwardRequest(requestUrl.toString(), request, requestHeaders, apiKey);
+				const response = await this.forwardRequest(requestUrl.toString(), request, requestHeaders, apiKey, cachedBody);
 				const responseTime = Date.now() - startTime;
 
 				// 记录统计数据
@@ -702,7 +714,8 @@ export class LoadBalancer extends DurableObject {
 			case req.model.endsWith('-search-preview'):
 			case req.tools?.some((tool: any) => tool.function?.name === 'googleSearch'):
 				body.tools = body.tools || [];
-				body.tools.push({ function_declarations: [{ name: 'googleSearch', parameters: {} }] });
+				// Use Gemini's native Google Search tool format
+				body.tools.push({ googleSearch: {} } as any);
 		}
 
 		const TASK = req.stream ? 'streamGenerateContent' : 'generateContent';
